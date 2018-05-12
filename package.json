@@ -1,0 +1,20 @@
+{
+  "name": "hyper-htm",
+  "version": "1.0.0",
+  "keywords": [
+    "hyper",
+    "htm",
+    "hyper-htm",
+    "hyper.app",
+    "hyper-plugin"
+  ],
+  "description": "Adds HTM support to Hyper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MisterTea/hyper-htm.git"
+  },
+  "dependencies": {
+    "uuid": "^3.2.1"
+  },
+  "license": "BSD-3-Clause"
+}
