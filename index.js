@@ -1,4 +1,5 @@
 const uuid = require('uuid');
+const FollowerSession = require('./follower-session');
 
 const INSERT_KEYS = '1';
 const INIT_STATE = '2';
@@ -17,7 +18,7 @@ exports.onWindow = function(window) {
   const sessions = window.sessions;
   const htmRegexp = new RegExp(/\u001b\u005b###q/);
   window.leaderUid = null;
-  const initializedSessions = new Set();
+  window.initializedSessions = new Set();
 
   window.getFirstSessionId = (htmState, paneOrSplit) => {
     if (htmState.panes[paneOrSplit]) {
@@ -43,7 +44,7 @@ exports.onWindow = function(window) {
     } else {
       window.rpc.emit('split request horizontal', {sourceUid: sourceId, sessionUid: newId, follower: true});
     }
-    initializedSessions.add(newId);
+    window.initializedSessions.add(newId);
 
     setTimeout(() => {
       window.createSessionForSplit(htmState, panesOrSplits, vertical, i + 1, callback);
@@ -70,7 +71,7 @@ exports.onWindow = function(window) {
     // We pick the first session and create it with the tab
     const firstSessionId = window.getFirstSessionId(htmState, currentTab.paneOrSplit);
     window.rpc.emit('termgroup add req', {termGroupUid: currentTab.id, sessionUid: firstSessionId, follower: true});
-    initializedSessions.add(firstSessionId);
+    window.initializedSessions.add(firstSessionId);
     if (htmState.splits && htmState.splits[currentTab.paneOrSplit]) {
       setTimeout(() => {
         window.createSplit(htmState, htmState.splits[currentTab.paneOrSplit]);
@@ -100,7 +101,6 @@ exports.onWindow = function(window) {
       const htmSession = sessions.get(window.leaderUid);
       if (opts.sessionUid) {
         // This is part of htm initialization
-        sessionUid = opts.sessionUid;
       } else if (opts.splitDirection) {
         // We are splitting an existing tab
         console.log('Creating new split for htm');
@@ -115,7 +115,7 @@ exports.onWindow = function(window) {
         const directionString = vertical ? '1' : '0';
         const packet = NEW_SPLIT + b64Length + splitFromUid + newSessionUid + directionString;
         htmSession.pty.write(packet);
-        initializedSessions.add(newSessionUid);
+        window.initializedSessions.add(newSessionUid);
       } else {
         // We are creating a new tab.  Get the termgroup uid and inform htm.
         opts.sessionUid = uuid.v4();
@@ -127,10 +127,19 @@ exports.onWindow = function(window) {
         const b64Length = buf.toString('base64');
         const packet = NEW_TAB + b64Length + opts.termGroupUid + opts.sessionUid;
         htmSession.pty.write(packet);
-        initializedSessions.add(opts.sessionUid);
+        window.initializedSessions.add(opts.sessionUid);
       }
+      let sessionUid = null;
+      if (opts.sessionUid) {
+        // The session Uid is provided.
+        sessionUid = opts.sessionUid;
+      } else {
+        sessionUid = uuid.v4();
+      }
+      fn_(sessionUid, new FollowerSession(window, sessionUid, sessions.get(window.leaderUid).shell));
+    } else {
+      window.oldInitSession(opts, fn_);
     }
-    window.oldInitSession(opts, fn_);
   };
 
   window.processHtmData = function() {
@@ -201,6 +210,7 @@ exports.onWindow = function(window) {
       window.processHtmData();
     } else {
       if (htmRegexp.test(data)) {
+        console.log('Enabling HTM mode');
         window.leaderUid = uid;
         window.htmBuffer = data.substring(data.search(htmRegexp) + 6);
         window.processHtmData();
@@ -212,7 +222,7 @@ exports.onWindow = function(window) {
   console.log(window.handleSessionData);
 
   window.followerWrite = (uid, data) => {
-    if (!initializedSessions.has(uid)) {
+    if (!window.initializedSessions.has(uid)) {
       console.log('Waiting to write to ' + uid);
       setTimeout(() => {
         window.followerWrite(uid, data);
@@ -228,7 +238,7 @@ exports.onWindow = function(window) {
   };
 
   window.followerResize = (uid, cols, rows) => {
-    if (!initializedSessions.has(uid)) {
+    if (!window.initializedSessions.has(uid)) {
       console.log('Waiting to resize ' + uid);
       setTimeout(() => {
         window.followerResize(uid, cols, rows);
@@ -261,6 +271,20 @@ exports.onWindow = function(window) {
     } else {
       //eslint-disable-next-line no-console
       logger.log('session not found by', uid);
+    }
+  });
+
+  // Pull out the data listeners so we can check for leaderUid first.
+  let dataListeners = window.rpc.listeners('data');
+  dataListeners = window.rpc.listeners('data').slice();
+  window.rpc.removeAllListeners('data');
+  window.rpc.on('data', ({uid, data, escaped}) => {
+    if (uid == window.leaderUid) {
+      // For now, ignore input to the htm session
+      return;
+    }
+    for (let a = 0; a < dataListeners.length; a++) {
+      dataListeners[a]({uid, data, escaped});
     }
   });
 };
