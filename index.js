@@ -17,6 +17,7 @@ exports.onWindow = function(window) {
   const sessions = window.sessions;
   const htmRegexp = new RegExp(/\u001b\u005b###q/);
   window.leaderUid = null;
+  const initializedSessions = new Set();
 
   window.getFirstSessionId = (htmState, paneOrSplit) => {
     if (htmState.panes[paneOrSplit]) {
@@ -42,6 +43,7 @@ exports.onWindow = function(window) {
     } else {
       window.rpc.emit('split request horizontal', {sourceUid: sourceId, sessionUid: newId, follower: true});
     }
+    initializedSessions.add(newId);
 
     setTimeout(() => {
       window.createSessionForSplit(htmState, panesOrSplits, vertical, i + 1, callback);
@@ -68,6 +70,7 @@ exports.onWindow = function(window) {
     // We pick the first session and create it with the tab
     const firstSessionId = window.getFirstSessionId(htmState, currentTab.paneOrSplit);
     window.rpc.emit('termgroup add req', {termGroupUid: currentTab.id, sessionUid: firstSessionId, follower: true});
+    initializedSessions.add(firstSessionId);
     if (htmState.splits && htmState.splits[currentTab.paneOrSplit]) {
       setTimeout(() => {
         window.createSplit(htmState, htmState.splits[currentTab.paneOrSplit]);
@@ -94,7 +97,6 @@ exports.onWindow = function(window) {
   window.oldInitSession = window.initSession;
   window.initSession = (opts, fn_) => {
     if (window.leaderUid) {
-      let sessionUid = uuid.v4();
       const htmSession = sessions.get(window.leaderUid);
       if (opts.sessionUid) {
         // This is part of htm initialization
@@ -102,8 +104,9 @@ exports.onWindow = function(window) {
       } else if (opts.splitDirection) {
         // We are splitting an existing tab
         console.log('Creating new split for htm');
+        opts.sessionUid = uuid.v4();
         const splitFromUid = opts.activeUid;
-        const newSessionUid = sessionUid;
+        const newSessionUid = opts.sessionUid;
         const vertical = opts.splitDirection == 'VERTICAL';
         const length = splitFromUid.length + newSessionUid.length + 1;
         const buf = Buffer.allocUnsafe(4);
@@ -112,35 +115,39 @@ exports.onWindow = function(window) {
         const directionString = vertical ? '1' : '0';
         const packet = NEW_SPLIT + b64Length + splitFromUid + newSessionUid + directionString;
         htmSession.pty.write(packet);
+        initializedSessions.add(newSessionUid);
       } else {
         // We are creating a new tab.  Get the termgroup uid and inform htm.
-        console.log('CREATING NEW TAB FOR HTM');
+        opts.sessionUid = uuid.v4();
         opts.termGroupUid = uuid.v4();
-        const length = opts.termGroupUid.length + sessionUid.length;
+        console.log('CREATING NEW TAB FOR HTM: ' + opts.termGroupUid + ' ' + opts.sessionUid);
+        const length = opts.termGroupUid.length + opts.sessionUid.length;
         const buf = Buffer.allocUnsafe(4);
         buf.writeInt32LE(length, 0);
         const b64Length = buf.toString('base64');
-        const packet = NEW_TAB + b64Length + opts.termGroupUid + sessionUid;
+        const packet = NEW_TAB + b64Length + opts.termGroupUid + opts.sessionUid;
         htmSession.pty.write(packet);
+        initializedSessions.add(opts.sessionUid);
       }
     }
     window.oldInitSession(opts, fn_);
   };
 
   window.processHtmData = function() {
-    console.log('CHECKING FOR MESSAGE IN BUFFER: ' + window.htmBuffer);
+    console.log(new Date().toLocaleTimeString() + ' Buffer length: ' + window.htmBuffer.length);
     while (window.htmBuffer.length >= 9) {
       if (waitingForInit) {
         setTimeout(window.processHtmData, 100);
         return;
       }
+      const packetHeader = window.htmBuffer[0];
+      console.log(new Date().toLocaleTimeString() + 'GOT PACKET WITH HEADER: ' + packetHeader);
       let length = Buffer.from(window.htmBuffer.substring(1, 9), 'base64').readInt32LE(0);
-      if (window.htmBuffer.length - 8 < length) {
+      console.log(new Date().toLocaleTimeString() + 'length needed: ' + length);
+      if (window.htmBuffer.length - 9 < length) {
         // Not enough data
         break;
       }
-      const packetHeader = window.htmBuffer[0];
-      console.log('GOT PACKET WITH HEADER: ' + packetHeader);
       switch (packetHeader) {
         case INIT_STATE: {
           const rawJsonData = window.htmBuffer.substring(9, 9 + length);
@@ -178,7 +185,7 @@ exports.onWindow = function(window) {
         }
         default: {
           // Ignore
-          logger.error('Ignoring packet with header: ' + packetHeader);
+          console.error('Ignoring packet with header: ' + packetHeader);
           window.htmBuffer = window.htmBuffer.slice(9 + length);
           break;
         }
@@ -205,6 +212,13 @@ exports.onWindow = function(window) {
   console.log(window.handleSessionData);
 
   window.followerWrite = (uid, data) => {
+    if (!initializedSessions.has(uid)) {
+      console.log('Waiting to write to ' + uid);
+      setTimeout(() => {
+        window.followerWrite(uid, data);
+      }, 100);
+      return;
+    }
     const length = uid.length + data.length;
     const buf = Buffer.allocUnsafe(4);
     buf.writeInt32LE(length, 0);
@@ -214,6 +228,13 @@ exports.onWindow = function(window) {
   };
 
   window.followerResize = (uid, cols, rows) => {
+    if (!initializedSessions.has(uid)) {
+      console.log('Waiting to resize ' + uid);
+      setTimeout(() => {
+        window.followerResize(uid, cols, rows);
+      }, 100);
+      return;
+    }
     const buf = Buffer.allocUnsafe(4);
     buf.writeInt32LE(cols, 0);
     const b64Cols = buf.toString('base64');
