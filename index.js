@@ -14,6 +14,12 @@ const UUID_LENGTH = 36;
 
 exports.onWindow = function(window) {
   console.log('GOT WINDOW: ' + window);
+  if (typeof window.oldInitSession !== 'undefined') {
+    // Already managed by a plugin
+    console.log('A plugin is already managing this window');
+    return;
+  }
+
   let waitingForInit = false;
   const sessions = window.sessions;
   const htmRegexp = new RegExp(/\u001b\u005b###q/);
@@ -257,22 +263,31 @@ exports.onWindow = function(window) {
     sessions.get(window.leaderUid).pty.write(packet);
   };
 
-  window.rpc.on('exit', ({uid}) => {
+  window.oldDeleteSession = window.deleteSession;
+  window.deleteSession = uid => {
     const session = sessions.get(uid);
     if (session) {
       if (window.leaderUid) {
-        const length = uid.length;
-        const buf = Buffer.allocUnsafe(4);
-        buf.writeInt32LE(length, 0);
-        const b64Length = buf.toString('base64');
-        const packet = CLIENT_CLOSE_PANE + b64Length + uid;
-        sessions.get(window.leaderUid).pty.write(packet);
+        if (window.leaderUid === uid) {
+          console.log("Closing leader");
+          // Closing the leader causes the entire window to collapse
+          window.close();
+        } else {
+          console.log("Closing follower");
+          const length = uid.length;
+          const buf = Buffer.allocUnsafe(4);
+          buf.writeInt32LE(length, 0);
+          const b64Length = buf.toString('base64');
+          const packet = CLIENT_CLOSE_PANE + b64Length + uid;
+          sessions.get(window.leaderUid).pty.write(packet);
+        }
       }
     } else {
       //eslint-disable-next-line no-console
-      logger.log('session not found by', uid);
+      console.log('session not found by', uid);
     }
-  });
+    window.oldDeleteSession(uid);
+  };
 
   // Pull out the data listeners so we can check for leaderUid first.
   let dataListeners = window.rpc.listeners('data');
