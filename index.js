@@ -9,6 +9,8 @@ const NEW_TAB = '5';
 const SERVER_CLOSE_PANE = '8';
 const NEW_SPLIT = '9';
 const RESIZE_PANE = 'A';
+const DEBUG_LOG = 'B';
+const INSERT_DEBUG_KEYS = 'C';
 
 const UUID_LENGTH = 36;
 
@@ -22,7 +24,8 @@ exports.onWindow = function(window) {
 
   let waitingForInit = false;
   const sessions = window.sessions;
-  const htmRegexp = new RegExp(/\u001b\u005b###q/);
+  const htmInitRegexp = new RegExp(/\u001b\u005b###q/);
+  const htmExitRegexp = new RegExp(/\u001b\u005b\$\$\$q/);
   window.leaderUid = null;
   window.initializedSessions = new Set();
 
@@ -149,6 +152,12 @@ exports.onWindow = function(window) {
   };
 
   window.processHtmData = function() {
+    if (window.sessions.size == 0) {
+      // The window has been cleaned up.  Bail.
+      return;
+    }
+    console.log("# SESSIONS: " + window.sessions.size);
+
     console.log(new Date().toLocaleTimeString() + ' Buffer length: ' + window.htmBuffer.length);
     while (window.htmBuffer.length >= 9) {
       if (waitingForInit) {
@@ -166,13 +175,11 @@ exports.onWindow = function(window) {
       switch (packetHeader) {
         case INIT_STATE: {
           const rawJsonData = window.htmBuffer.substring(9, 9 + length);
-          window.htmBuffer = window.htmBuffer.slice(9 + length);
           const htmState = JSON.parse(rawJsonData);
           window.htmShell = htmState.shell;
           console.log('INITIALIZING HTM');
           waitingForInit = true;
           window.initHtm(htmState);
-          // TODO: Replace this with somethign that waits until the init is done
           setTimeout(() => {
             waitingForInit = false;
           }, 1000);
@@ -182,13 +189,18 @@ exports.onWindow = function(window) {
           const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
           let paneData = window.htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
           paneData = Buffer.from(paneData, 'base64').toString('utf8');
-          window.htmBuffer = window.htmBuffer.slice(9 + length);
           window.rpc.emit('session data', {uid: sessionId, data: paneData});
+          break;
+        }
+        case DEBUG_LOG: {
+          let paneData = window.htmBuffer.substring(9, 9 + length);
+          paneData = Buffer.from(paneData, 'base64').toString('utf8');
+          console.log("GOT DEBUG LOG: " + paneData);
+          window.rpc.emit('session data', {uid: window.leaderUid, data: paneData});
           break;
         }
         case SERVER_CLOSE_PANE: {
           const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
-          window.htmBuffer = window.htmBuffer.slice(9 + length);
           console.log('CLOSING SESSION ' + sessionId);
           window.rpc.emit('session exit', {sessionId});
           const sessionToClose = sessions.get(sessionId);
@@ -201,10 +213,10 @@ exports.onWindow = function(window) {
         default: {
           // Ignore
           console.error('Ignoring packet with header: ' + packetHeader);
-          window.htmBuffer = window.htmBuffer.slice(9 + length);
           break;
         }
       }
+      window.htmBuffer = window.htmBuffer.slice(9 + length);
     }
   };
 
@@ -212,13 +224,18 @@ exports.onWindow = function(window) {
   window.handleSessionData = (uid, data, handleSessionCallback) => {
     console.log('IN CUSTOM SESSION DATA HANDLER');
     if (window.leaderUid) {
+      if (htmExitRegexp.test(data)) {
+        console.log("Exiting HTM mode");
+        window.clean();
+        window.close();
+      }
       window.htmBuffer += data;
       window.processHtmData();
     } else {
-      if (htmRegexp.test(data)) {
+      if (htmInitRegexp.test(data)) {
         console.log('Enabling HTM mode');
         window.leaderUid = uid;
-        window.htmBuffer = data.substring(data.search(htmRegexp) + 6);
+        window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
         window.processHtmData();
       } else {
         handleSessionCallback(uid, data);
@@ -269,11 +286,12 @@ exports.onWindow = function(window) {
     if (session) {
       if (window.leaderUid) {
         if (window.leaderUid === uid) {
-          console.log("Closing leader");
+          console.log('Closing leader');
           // Closing the leader causes the entire window to collapse
+          window.clean();
           window.close();
         } else {
-          console.log("Closing follower");
+          console.log('Closing follower');
           const length = uid.length;
           const buf = Buffer.allocUnsafe(4);
           buf.writeInt32LE(length, 0);
@@ -292,9 +310,14 @@ exports.onWindow = function(window) {
   window.oldSessionInput = window.handleSessionInput;
   window.handleSessionInput = (uid, data, escaped) => {
     if (uid == window.leaderUid) {
-      // For now, ignore input to the htm session
-      return;
+      const length = data.length;
+      const buf = Buffer.allocUnsafe(4);
+      buf.writeInt32LE(length, 0);
+      const b64Length = buf.toString('base64');
+      const packet = INSERT_DEBUG_KEYS + b64Length + data;
+      sessions.get(window.leaderUid).pty.write(packet);
+    } else {
+      window.oldSessionInput(uid, data, escaped);
     }
-    window.oldSessionInput(uid, data, escaped);
-  }
+  };
 };
