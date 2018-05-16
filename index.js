@@ -289,17 +289,12 @@ exports.onWindow = function(window) {
     window.oldDeleteSession(uid);
   };
 
-  // Pull out the data listeners so we can check for leaderUid first.
-  let dataListeners = window.rpc.listeners('data');
-  dataListeners = window.rpc.listeners('data').slice();
-  window.rpc.removeAllListeners('data');
-  window.rpc.on('data', ({uid, data, escaped}) => {
+  window.oldSessionInput = window.handleSessionInput;
+  window.handleSessionInput = (uid, data, escaped) => {
     if (uid == window.leaderUid) {
       // For now, ignore input to the htm session
       return;
     }
-    for (let a = 0; a < dataListeners.length; a++) {
-      dataListeners[a]({uid, data, escaped});
-    }
-  });
+    window.oldSessionInput(uid, data, escaped);
+  }
 };
