@@ -28,6 +28,7 @@ exports.onWindow = function(window) {
   const htmExitRegexp = new RegExp(/\u001b\u005b\$\$\$q/);
   window.leaderUid = null;
   window.initializedSessions = new Set();
+  window.serverDefinedSessions = new Set();
 
   window.getFirstSessionId = (htmState, paneOrSplit) => {
     if (htmState.panes[paneOrSplit]) {
@@ -48,10 +49,11 @@ exports.onWindow = function(window) {
     const sourceId = window.getFirstSessionId(htmState, panesOrSplits[i - 1]);
     const newId = window.getFirstSessionId(htmState, panesOrSplits[i]);
 
+    window.serverDefinedSessions.add(newId);
     if (vertical) {
-      window.rpc.emit('split request vertical', {sourceUid: sourceId, sessionUid: newId, follower: true});
+      window.rpc.emit('split request vertical', {activeUid: sourceId, sessionUid: newId, follower: true});
     } else {
-      window.rpc.emit('split request horizontal', {sourceUid: sourceId, sessionUid: newId, follower: true});
+      window.rpc.emit('split request horizontal', {activeUid: sourceId, sessionUid: newId, follower: true});
     }
     window.initializedSessions.add(newId);
 
@@ -79,6 +81,7 @@ exports.onWindow = function(window) {
     // When we create a tab (a term group in hyperjs terms), we must also create a session.
     // We pick the first session and create it with the tab
     const firstSessionId = window.getFirstSessionId(htmState, currentTab.paneOrSplit);
+    window.serverDefinedSessions.add(firstSessionId);
     window.rpc.emit('termgroup add req', {termGroupUid: currentTab.id, sessionUid: firstSessionId, follower: true});
     window.initializedSessions.add(firstSessionId);
     if (htmState.splits && htmState.splits[currentTab.paneOrSplit]) {
@@ -108,12 +111,11 @@ exports.onWindow = function(window) {
   window.initSession = (opts, fn_) => {
     if (window.leaderUid) {
       const htmSession = sessions.get(window.leaderUid);
-      if (opts.sessionUid) {
-        // This is part of htm initialization
+      if (window.serverDefinedSessions.has(opts.sessionUid)) {
+        // This is part of htm initialization.  Don't tell HTM to create anything.
       } else if (opts.splitDirection) {
         // We are splitting an existing tab
         console.log('Creating new split for htm');
-        opts.sessionUid = uuid.v4();
         const splitFromUid = opts.activeUid;
         const newSessionUid = opts.sessionUid;
         const vertical = opts.splitDirection == 'VERTICAL';
@@ -127,8 +129,6 @@ exports.onWindow = function(window) {
         window.initializedSessions.add(newSessionUid);
       } else {
         // We are creating a new tab.  Get the termgroup uid and inform htm.
-        opts.sessionUid = uuid.v4();
-        opts.termGroupUid = uuid.v4();
         console.log('CREATING NEW TAB FOR HTM: ' + opts.termGroupUid + ' ' + opts.sessionUid);
         const length = opts.termGroupUid.length + opts.sessionUid.length;
         const buf = Buffer.allocUnsafe(4);
@@ -139,12 +139,7 @@ exports.onWindow = function(window) {
         window.initializedSessions.add(opts.sessionUid);
       }
       let sessionUid = null;
-      if (opts.sessionUid) {
-        // The session Uid is provided.
-        sessionUid = opts.sessionUid;
-      } else {
-        sessionUid = uuid.v4();
-      }
+      sessionUid = opts.sessionUid;
       fn_(sessionUid, new FollowerSession(window, sessionUid, sessions.get(window.leaderUid).shell));
     } else {
       window.oldInitSession(opts, fn_);
