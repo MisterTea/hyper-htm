@@ -247,11 +247,12 @@ exports.onWindow = function(window) {
       }, 100);
       return;
     }
-    const length = uid.length + data.length;
+    const b64Data = Buffer.from(data).toString('base64');
+    const length = uid.length + b64Data.length;
     const buf = Buffer.allocUnsafe(4);
     buf.writeInt32LE(length, 0);
     const b64Length = buf.toString('base64');
-    const packet = INSERT_KEYS + b64Length + uid + data;
+    const packet = INSERT_KEYS + b64Length + uid + b64Data;
     sessions.get(window.leaderUid).pty.write(packet);
   };
 
