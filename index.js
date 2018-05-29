@@ -34,6 +34,7 @@ exports.onWindow = function(window) {
   // Note that only follower sessions are mapped.  The leader retains it's uuid.
   const htmHyperUidMap = new Map();
   const hyperHtmUidMap = new Map();
+  let htmBuffer = '';
 
   const getFirstSessionId = (htmState, paneOrSplit) => {
     if (htmState.panes[paneOrSplit]) {
@@ -188,25 +189,24 @@ exports.onWindow = function(window) {
     }
     console.log('# SESSIONS: ' + window.sessions.size);
 
-    console.log(new Date().toLocaleTimeString() + ' Buffer length: ' + window.htmBuffer.length);
-    while (window.htmBuffer.length >= 9) {
+    console.log(new Date().toLocaleTimeString() + ' Buffer length: ' + htmBuffer.length);
+    while (htmBuffer.length >= 9) {
       if (waitingForInit) {
         setTimeout(processHtmData, 100);
         return;
       }
-      const packetHeader = window.htmBuffer[0];
+      const packetHeader = htmBuffer[0];
       console.log(new Date().toLocaleTimeString() + 'GOT PACKET WITH HEADER: ' + packetHeader);
-      let length = Buffer.from(window.htmBuffer.substring(1, 9), 'base64').readInt32LE(0);
+      let length = Buffer.from(htmBuffer.substring(1, 9), 'base64').readInt32LE(0);
       console.log(new Date().toLocaleTimeString() + 'length needed: ' + length);
-      if (window.htmBuffer.length - 9 < length) {
+      if (htmBuffer.length - 9 < length) {
         // Not enough data
         break;
       }
       switch (packetHeader) {
         case INIT_STATE: {
-          const rawJsonData = window.htmBuffer.substring(9, 9 + length);
+          const rawJsonData = htmBuffer.substring(9, 9 + length);
           const htmState = JSON.parse(rawJsonData);
-          window.htmShell = htmState.shell;
           console.log('INITIALIZING HTM');
           waitingForInit = true;
           initHtm(htmState);
@@ -216,21 +216,21 @@ exports.onWindow = function(window) {
           break;
         }
         case APPEND_TO_PANE: {
-          const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
-          let paneData = window.htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
+          const sessionId = htmBuffer.substring(9, 9 + UUID_LENGTH);
+          let paneData = htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
           paneData = Buffer.from(paneData, 'base64').toString('utf8');
           window.rpc.emit('session data', {uid: htmHyperUidMap.get(sessionId), data: paneData});
           break;
         }
         case DEBUG_LOG: {
-          let paneData = window.htmBuffer.substring(9, 9 + length);
+          let paneData = htmBuffer.substring(9, 9 + length);
           paneData = Buffer.from(paneData, 'base64').toString('utf8');
           console.log('GOT DEBUG LOG: ' + paneData);
           window.rpc.emit('session data', {uid: leaderUid, data: paneData});
           break;
         }
         case SERVER_CLOSE_PANE: {
-          const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
+          const sessionId = htmBuffer.substring(9, 9 + UUID_LENGTH);
           console.log('CLOSING SESSION ' + sessionId);
           window.rpc.emit('session exit', {uid: htmHyperUidMap.get(sessionId)});
           window.oldDeleteSession(htmHyperUidMap.get(sessionId));
@@ -242,7 +242,7 @@ exports.onWindow = function(window) {
           break;
         }
       }
-      window.htmBuffer = window.htmBuffer.slice(9 + length);
+      htmBuffer = htmBuffer.slice(9 + length);
     }
   };
 
@@ -280,13 +280,13 @@ exports.onWindow = function(window) {
         closeSessions(0);
         return;
       }
-      window.htmBuffer += data;
+      htmBuffer += data;
       processHtmData();
     } else {
       if (htmInitRegexp.test(data)) {
         console.log('Enabling HTM mode');
         leaderUid = uid;
-        window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
+        htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
         processHtmData();
       } else {
         handleSessionCallback(uid, data);
