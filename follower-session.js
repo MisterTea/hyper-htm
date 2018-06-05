@@ -19,6 +19,9 @@ module.exports = class HtmSession extends EventEmitter {
     this.shell = shell;
   }
 
+  init() {
+  }
+
   exit() {
     this.destroy();
   }
