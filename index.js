@@ -16,8 +16,6 @@ const UUID_LENGTH = 36;
 const htmInitRegexp = new RegExp(/\u001b\u005b###q/);
 const htmExitRegexp = new RegExp(/\u001b\u005b\$\$\$q/);
 
-let window = null;
-
 const getFirstSessionId = (htmState, paneOrSplit) => {
   if (htmState.panes[paneOrSplit]) {
     return paneOrSplit;
@@ -26,13 +24,13 @@ const getFirstSessionId = (htmState, paneOrSplit) => {
   }
 };
 
-const addToUidBimap = function(htmUid, hyperUid) {
+const addToUidBimap = function(window, htmUid, hyperUid) {
   console.log('MAPPING HTM TO HYPER: ' + htmUid + ' <-> ' + hyperUid + ' ' + typeof hyperUid);
   window.htmHyperUidMap.set(htmUid, hyperUid);
   window.hyperHtmUidMap.set(hyperUid, htmUid);
 };
 
-const createSessionForSplit = function(htmState, panesOrSplits, vertical, i, callback) {
+const createSessionForSplit = function(window, htmState, panesOrSplits, vertical, i, callback) {
   if (i >= panesOrSplits.length) {
     setTimeout(() => {
       callback();
@@ -42,7 +40,7 @@ const createSessionForSplit = function(htmState, panesOrSplits, vertical, i, cal
 
   const sourceId = getFirstSessionId(htmState, panesOrSplits[i - 1]);
   const newId = getFirstSessionId(htmState, panesOrSplits[i]);
-  addToUidBimap(newId, uuid.v4());
+  addToUidBimap(window, newId, uuid.v4());
 
   window.serverDefinedSessions.add(newId);
   if (vertical) {
@@ -61,31 +59,31 @@ const createSessionForSplit = function(htmState, panesOrSplits, vertical, i, cal
   window.initializedSessions.add(newId);
 
   setTimeout(() => {
-    createSessionForSplit(htmState, panesOrSplits, vertical, i + 1, callback);
+    createSessionForSplit(window, htmState, panesOrSplits, vertical, i + 1, callback);
   }, 100);
 };
 
-const createSplit = function(htmState, split) {
+const createSplit = function(window, htmState, split) {
   const panesOrSplits = split.panesOrSplits;
   // Create the top-level panes (except the first one, which already exists)
-  createSessionForSplit(htmState, panesOrSplits, split.vertical, 1, () => {
+  createSessionForSplit(window, htmState, panesOrSplits, split.vertical, 1, () => {
     // Go through the list looking for splits and handling accordingly.
     for (var a = 0; a < panesOrSplits.length; a++) {
       const innerSplit = htmState.splits[panesOrSplits[a]];
       if (innerSplit) {
         // We found a split, recurse
-        createSplit(htmState, innerSplit);
+        createSplit(window, htmState, innerSplit);
       }
     }
   });
 };
 
-const createTab = function(htmState, currentTab) {
+const createTab = function(window, htmState, currentTab) {
   // When we create a tab (a term group in hyperjs terms), we must also create a session.
   // We pick the first session and create it with the tab
   const firstSessionId = getFirstSessionId(htmState, currentTab.paneOrSplit);
   window.serverDefinedSessions.add(firstSessionId);
-  addToUidBimap(firstSessionId, uuid.v4());
+  addToUidBimap(window, firstSessionId, uuid.v4());
   window.rpc.emit('termgroup add req', {
     termGroupUid: currentTab.id,
     sessionUid: window.htmHyperUidMap.get(firstSessionId),
@@ -94,12 +92,12 @@ const createTab = function(htmState, currentTab) {
   window.initializedSessions.add(firstSessionId);
   if (htmState.splits && htmState.splits[currentTab.paneOrSplit]) {
     setTimeout(() => {
-      createSplit(htmState, htmState.splits[currentTab.paneOrSplit]);
+      createSplit(window, htmState, htmState.splits[currentTab.paneOrSplit]);
     }, 100);
   }
 };
 
-const initHtm = function(htmState) {
+const initHtm = function(window, htmState) {
   for (var order = 0; order < Object.keys(htmState.tabs).length; order++) {
     for (var property in htmState.tabs) {
       if (!htmState.tabs.hasOwnProperty(property)) {
@@ -110,12 +108,12 @@ const initHtm = function(htmState) {
       if (tab.order != order && !(typeof tab.order === 'undefined' && order == 0)) {
         continue;
       }
-      createTab(htmState, tab);
+      createTab(window, htmState, tab);
     }
   }
 };
 
-const processHtmData = function() {
+const processHtmData = function(window) {
   if (window.sessions.size == 0) {
     // The window has been cleaned up.  Bail.
     return;
@@ -125,7 +123,9 @@ const processHtmData = function() {
   console.log(new Date().toLocaleTimeString() + ' Buffer length: ' + window.htmBuffer.length);
   while (window.htmBuffer.length >= 9) {
     if (window.waitingForInit) {
-      setTimeout(processHtmData, 100);
+      setTimeout(function() {
+        processHtmData(window);
+      }, 100);
       return;
     }
     const packetHeader = window.htmBuffer[0];
@@ -148,7 +148,7 @@ const processHtmData = function() {
         const htmState = JSON.parse(rawJsonData);
         console.log('INITIALIZING HTM');
         window.waitingForInit = true;
-        initHtm(htmState);
+        initHtm(window, htmState);
         setTimeout(() => {
           window.waitingForInit = false;
         }, 1000);
@@ -185,7 +185,11 @@ const processHtmData = function() {
   }
 };
 
-exports.extendSession = function(opts, newSession) {
+exports.extendSession = function(window, opts, newSession) {
+  console.log("WINDOW");
+    console.log(window);
+    console.log(opts);
+    console.log(newSession);
   const uid = opts.sessionUid;
   if (window.leaderUid) {
     const htmSession = window.sessions.get(window.leaderUid);
@@ -198,7 +202,7 @@ exports.extendSession = function(opts, newSession) {
       // We are splitting an existing tab
       const splitFromUid = window.hyperHtmUidMap.get(opts.activeUid);
 
-      addToUidBimap(uuid.v4(), opts.sessionUid);
+      addToUidBimap(window, uuid.v4(), opts.sessionUid);
       const newSessionUid = window.hyperHtmUidMap.get(opts.sessionUid);
       console.log('Creating new split for htm: ' + opts.sessionUid + ' -> ' + newSessionUid);
 
@@ -213,7 +217,7 @@ exports.extendSession = function(opts, newSession) {
       window.initializedSessions.add(newSessionUid);
     } else {
       // We are creating a new tab.  Get the termgroup uid and inform htm.
-      addToUidBimap(uuid.v4(), opts.sessionUid);
+      addToUidBimap(window, uuid.v4(), opts.sessionUid);
       const newSessionUid = window.hyperHtmUidMap.get(opts.sessionUid);
 
       console.log('CREATING NEW TAB FOR HTM: ' + opts.termGroupUid + ' ' + opts.sessionUid + ' -> ' + newSessionUid);
@@ -227,6 +231,8 @@ exports.extendSession = function(opts, newSession) {
     }
     return new FollowerSession(window, window.hyperHtmUidMap.get(opts.sessionUid), window.sessions.get(window.leaderUid).shell);
   } else {
+      console.log("CREATING POTENTIAL LEADER");
+      console.log(newSession);
     // Swap out the read function on the session with one that handles htm
     newSession.oldRead = newSession.read;
     newSession.read = function(data) {
@@ -263,7 +269,7 @@ exports.extendSession = function(opts, newSession) {
           return;
         }
         window.htmBuffer += data;
-        processHtmData();
+        processHtmData(window);
       } else {
         console.log("Testing for HTM");
         if (htmInitRegexp.test(data)) {
@@ -272,7 +278,7 @@ exports.extendSession = function(opts, newSession) {
           window.leaderUid = uid;
           window.leaderUid = uid;
           window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
-          processHtmData();
+          processHtmData(window);
         } else {
           newSession.oldRead(data);
         }
@@ -302,13 +308,14 @@ exports.extendSession = function(opts, newSession) {
         newSession.oldWrite(data);
       }
     };
-    return newSession;
+      console.log(newSession);
+      console.log(newSession.init);
+      return newSession;
   }
 };
 
-exports.onWindow = function(window_) {
-  console.log('GOT WINDOW: ' + window_);
-  window = window_;
+exports.onWindow = function(window) {
+  console.log('GOT WINDOW: ' + window);
   if (window.htmMode) {
     // Already managed by a plugin
     console.log('A plugin is already managing this window');
