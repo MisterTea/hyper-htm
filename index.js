@@ -71,15 +71,14 @@ const createSplit = async function (window, htmState, split) {
   }
 };
 
-const createTab = async function (window, htmState, currentTab) {
+const createTab = async function (window, htmState, currentTab, previousTabHyperId) {
   // When we create a tab (a term group in hyperjs terms), we must also create a session.
   // We pick the first session and create it with the tab
   const firstSessionId = getFirstSessionId(htmState, currentTab.paneOrSplit);
   window.nextSessionHtmId = firstSessionId;
   console.log("CREATING TAB: " + window.nextSessionHtmId);
   window.rpc.emit('termgroup add req', {
-    termGroupUid: currentTab.id,
-    sessionUid: window.htmHyperUidMap.get(firstSessionId),
+    activeUid: previousTabHyperId,
   });
   while (window.nextSessionHtmId) {
     console.log("WAITING FOR TAB TO EXIST");
@@ -90,9 +89,16 @@ const createTab = async function (window, htmState, currentTab) {
   if (htmState.splits && htmState.splits[currentTab.paneOrSplit]) {
     await createSplit(window, htmState, htmState.splits[currentTab.paneOrSplit]);
   }
+  const tabHyperId = window.htmHyperUidMap.get(firstSessionId);
+  if (tabHyperId) {
+    return tabHyperId;
+  } else {
+    throw Exception("Could not find hyper tab id");
+  }
 };
 
 const initHtm = async function (window, htmState) {
+  var previousTabHyperId = window.leaderHyperUid;
   for (var order = 0; order < Object.keys(htmState.tabs).length; order++) {
     for (var property in htmState.tabs) {
       if (!htmState.tabs.hasOwnProperty(property)) {
@@ -103,7 +109,7 @@ const initHtm = async function (window, htmState) {
       if (tab.order != order && !(typeof tab.order === 'undefined' && order == 0)) {
         continue;
       }
-      await createTab(window, htmState, tab);
+      previousTabHyperId = await createTab(window, htmState, tab, previousTabHyperId);
     }
   }
 };
@@ -127,8 +133,33 @@ const processHtmData = function () {
     console.log(new Date().toLocaleTimeString() + 'GOT PACKET WITH HEADER: ' + packetHeader);
     if (packetHeader == SESSION_END) {
       console.log("Got shutdown");
-      window.clean();
-      window.close();
+
+      console.log('Exiting HTM mode');
+      const sessionsToClose = [];
+      window.sessions.forEach((session, key) => {
+        if (key != window.leaderHyperUid) {
+          console.log('CLOSING ' + key);
+          sessionsToClose.push(key);
+        } else {
+          console.log('NOT CLOSING: ' + key);
+        }
+      });
+      // Reset htm state
+      window.leaderHyperUid = null;
+      window.initializedSessions.clear();
+
+      // Close all followers (slowly so the UI has time to adjust)
+      const closeSessions = function (i) {
+        if (i == sessionsToClose.length) {
+          return;
+        }
+        window.rpc.emit('session exit', {uid: sessionsToClose[i]});
+        window.sessions.delete(sessionsToClose[i]);
+        setTimeout(() => {
+          closeSessions(i + 1);
+        }, 500);
+      };
+      closeSessions(0);
       return;
     }
     let length = Buffer.from(window.htmBuffer.substring(1, 9), 'base64').readInt32LE(0);
@@ -169,7 +200,7 @@ const processHtmData = function () {
         let paneData = window.htmBuffer.substring(9, 9 + length);
         paneData = Buffer.from(paneData, 'base64').toString('utf8');
         console.log('GOT DEBUG LOG: ' + paneData);
-        window.rpc.emit('session data', window.leaderUid + paneData);
+        window.rpc.emit('session data', window.leaderHyperUid + paneData);
         break;
       }
       case SERVER_CLOSE_PANE: {
@@ -190,17 +221,45 @@ const processHtmData = function () {
 };
 
 exports.decorateSessionClass = Session => {
-  if (window && window.leaderUid) {
+  if (window && window.leaderHyperUid) {
     return class HtmFollowerSession extends Session {
       constructor(options) {
-        console.log("CREATING FOLLOWING SESSION");
-        if (window.nextSessionHtmId == null) {
-          console.error("Tried to create a follower with no htm id");
-          throw "OOPS";
-        }
         super(options);
         this.uid = options.uid;
-        this.htmId = window.nextSessionHtmId;
+        console.log("CREATING FOLLOWING SESSION: " + options.uid);
+        if (window.nextSessionHtmId == null) {
+          this.htmId = uuid.v4();
+          addToUidBimap(window, this.htmId, options.uid);
+          if (options.splitDirection) {
+            // We are splitting an existing tab
+            const splitFromUid = window.hyperHtmUidMap.get(options.activeUid);
+
+            console.log('Creating new split for htm: ' + options.uid + ' -> ' + this.htmId);
+
+            const vertical = options.splitDirection == 'VERTICAL';
+            const length = splitFromUid.length + this.htmId.length + 1;
+            const buf = Buffer.allocUnsafe(4);
+            buf.writeInt32LE(length, 0);
+            const b64Length = buf.toString('base64');
+            const directionString = vertical ? '1' : '0';
+            const packet = NEW_SPLIT + b64Length + splitFromUid + this.htmId + directionString;
+            window.initializedSessions.add(this.htmId);
+            window.sessions.get(window.leaderHyperUid).pty.write(packet);
+          } else {
+            // We are creating a new tab.  Get the termgroup uid and inform htm.
+            let tabUid = uuid.v4();
+            console.log('CREATING NEW TAB FOR HTM: ' + tabUid + ' ' + options.uid + ' -> ' + this.htmId);
+            const length = tabUid.length + this.htmId.length;
+            const buf = Buffer.allocUnsafe(4);
+            buf.writeInt32LE(length, 0);
+            const b64Length = buf.toString('base64');
+            const packet = NEW_TAB + b64Length + tabUid + this.htmId;
+            window.initializedSessions.add(this.htmId);
+            window.sessions.get(window.leaderHyperUid).pty.write(packet);
+          }
+        } else {
+          this.htmId = window.nextSessionHtmId;
+        }
         addToUidBimap(window, this.htmId, this.uid);
         window.nextSessionHtmId = null;
         console.log("DONE WITH CONSTRUCTOR");
@@ -219,7 +278,7 @@ exports.decorateSessionClass = Session => {
 
       write(data) {
         if (!window.initializedSessions.has(this.htmId)) {
-          if (window.leaderUid == null) {
+          if (window.leaderHyperUid == null) {
             // HTM has ended.
             return;
           }
@@ -235,12 +294,12 @@ exports.decorateSessionClass = Session => {
         buf.writeInt32LE(length, 0);
         const b64Length = buf.toString('base64');
         const packet = INSERT_KEYS + b64Length + this.htmId + b64Data;
-        window.sessions.get(window.leaderUid).pty.write(packet);
+        window.sessions.get(window.leaderHyperUid).pty.write(packet);
       }
 
       resize({cols, rows}) {
         if (!window.initializedSessions.has(this.htmId)) {
-          if (window.leaderUid == null) {
+          if (window.leaderHyperUid == null) {
             // HTM has ended.
             return;
           }
@@ -259,23 +318,25 @@ exports.decorateSessionClass = Session => {
         buf.writeInt32LE(length, 0);
         const b64Length = buf.toString('base64');
         const packet = RESIZE_PANE + b64Length + b64Cols + b64Rows + this.htmId;
-        console.log("LEADER UID: " + window.leaderUid);
+        console.log("LEADER UID: " + window.leaderHyperUid);
         console.log("SESSIONS");
         console.log(window.sessions);
-        window.sessions.get(window.leaderUid).pty.write(packet);
+        window.sessions.get(window.leaderHyperUid).pty.write(packet);
       }
 
       destroy() {
         console.log('Closing follower');
+        /*
         const length = this.htmId.length;
         const buf = Buffer.allocUnsafe(4);
         buf.writeInt32LE(length, 0);
         const b64Length = buf.toString('base64');
         const packet = CLIENT_CLOSE_PANE + b64Length + this.htmId;
-        const leaderSession = window.sessions.get(window.leaderUid);
+        const leaderSession = window.sessions.get(window.leaderHyperUid);
         if (leaderSession) {
           leaderSession.pty.write(packet);
         }
+        */
         this.emit('exit');
         this.ended = true;
       }
@@ -300,14 +361,14 @@ exports.decorateSessionClass = Session => {
       }
 
       read(data) {
-        console.log("READING");
-        if (window.leaderUid == this.uid) {
+        console.log("READING:" + window.leaderHyperUid + " ?= " + this.uid);
+        if (window.leaderHyperUid == this.uid) {
           console.log('IN CUSTOM SESSION DATA HANDLER');
           if (htmExitRegexp.test(data)) {
             console.log('Exiting HTM mode');
             const sessionsToClose = [];
             window.sessions.forEach((session, key) => {
-              if (key != window.leaderUid) {
+              if (key != window.leaderHyperUid) {
                 console.log('CLOSING ' + key);
                 sessionsToClose.push(key);
               } else {
@@ -315,7 +376,7 @@ exports.decorateSessionClass = Session => {
               }
             });
             // Reset htm state
-            window.leaderUid = null;
+            window.leaderHyperUid = null;
             window.initializedSessions.clear();
 
             // Close all followers (slowly so the UI has time to adjust)
@@ -339,7 +400,7 @@ exports.decorateSessionClass = Session => {
           if (htmInitRegexp.test(data)) {
             // TODO: Close all other window.sessions
             console.log('Enabling HTM mode');
-            window.leaderUid = this.uid;
+            window.leaderHyperUid = this.uid;
             window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
             processHtmData();
           } else {
@@ -349,8 +410,8 @@ exports.decorateSessionClass = Session => {
       }
 
       destroy() {
-        if (window.leaderUid && window.leaderUid === this.uid) {
-          window.leaderUid = null;
+        if (window.leaderHyperUid && window.leaderHyperUid === this.uid) {
+          window.leaderHyperUid = null;
           console.log('Closing leader');
           // Closing the leader causes the entire window to collapse
           window.clean();
@@ -361,8 +422,8 @@ exports.decorateSessionClass = Session => {
 
       write(data) {
         console.log("WRITING");
-        console.log(window.leaderUid);
-        if (this.uid == window.leaderUid) {
+        console.log(window.leaderHyperUid);
+        if (this.uid == window.leaderHyperUid) {
           const length = data.length;
           const buf = Buffer.allocUnsafe(4);
           buf.writeInt32LE(length, 0);
@@ -380,45 +441,15 @@ exports.decorateSessionClass = Session => {
   console.log(opts);
   console.log(newSession);
   const uid = opts.sessionUid;
-  if (window.leaderUid) {
-    const htmSession = window.sessions.get(window.leaderUid);
+  if (window.leaderHyperUid) {
+    const htmSession = window.sessions.get(window.leaderHyperUid);
     console.log('CHECKING FOR ' + opts.sessionUid);
     console.log(window.hyperHtmUidMap);
     if (window.hyperHtmUidMap.has(opts.sessionUid)) {
       console.log('FOUND.  NOT SENDING HTM COMMAND');
       // This is part of htm initialization.  Don't tell HTM to create anything.
-    } else if (opts.splitDirection) {
-      // We are splitting an existing tab
-      const splitFromUid = window.hyperHtmUidMap.get(opts.activeUid);
-
-      addToUidBimap(window, uuid.v4(), opts.sessionUid);
-      const newSessionUid = window.hyperHtmUidMap.get(opts.sessionUid);
-      console.log('Creating new split for htm: ' + opts.sessionUid + ' -> ' + newSessionUid);
-
-      const vertical = opts.splitDirection == 'VERTICAL';
-      const length = splitFromUid.length + newSessionUid.length + 1;
-      const buf = Buffer.allocUnsafe(4);
-      buf.writeInt32LE(length, 0);
-      const b64Length = buf.toString('base64');
-      const directionString = vertical ? '1' : '0';
-      const packet = NEW_SPLIT + b64Length + splitFromUid + newSessionUid + directionString;
-      htmSession.pty.write(packet);
-      window.initializedSessions.add(newSessionUid);
-    } else {
-      // We are creating a new tab.  Get the termgroup uid and inform htm.
-      addToUidBimap(window, uuid.v4(), opts.sessionUid);
-      const newSessionUid = window.hyperHtmUidMap.get(opts.sessionUid);
-
-      console.log('CREATING NEW TAB FOR HTM: ' + opts.termGroupUid + ' ' + opts.sessionUid + ' -> ' + newSessionUid);
-      const length = opts.termGroupUid.length + newSessionUid.length;
-      const buf = Buffer.allocUnsafe(4);
-      buf.writeInt32LE(length, 0);
-      const b64Length = buf.toString('base64');
-      const packet = NEW_TAB + b64Length + opts.termGroupUid + newSessionUid;
-      htmSession.pty.write(packet);
-      window.initializedSessions.add(newSessionUid);
-    }
-    return new FollowerSession(window, window.hyperHtmUidMap.get(opts.sessionUid), window.sessions.get(window.leaderUid).shell);
+    } else
+      return new FollowerSession(window, window.hyperHtmUidMap.get(opts.sessionUid), window.sessions.get(window.leaderHyperUid).shell);
   } else {
     console.log("CREATING POTENTIAL LEADER");
     console.log(newSession);
@@ -439,7 +470,7 @@ exports.onWindow = function (window_) {
 
   window.htmMode = true;
   window.waitingForInit = false;
-  window.leaderUid = null;
+  window.leaderHyperUid = null;
   window.nextSessionHtmId = null;
   window.initializedSessions = new Set();
 
