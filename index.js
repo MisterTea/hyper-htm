@@ -227,7 +227,8 @@ const processHtmData = function () {
     switch (packetHeader) {
       case INIT_STATE: {
         const rawJsonData = window.htmBuffer.substring(9, 9 + length);
-        const htmState = JSON.parse(rawJsonData);
+        let decodedJsonData = Buffer.from(rawJsonData, "base64");
+        const htmState = JSON.parse(decodedJsonData);
         console.log("INITIALIZING HTM");
         window.waitingForInit = true;
         initHtm(window, htmState).then(() => {
