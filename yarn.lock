@@ -2,11 +2,6 @@
 # yarn lockfile v1
 
 
-hyper-htm@./:
-  version "1.0.3"
-  dependencies:
-    uuid "^3.2.1"
-
 uuid@^3.2.1:
   version "3.3.2"
   resolved "https://registry.npmjs.org/uuid/-/uuid-3.3.2.tgz"
