@@ -158,25 +158,28 @@ const processHtmData = function () {
     // The window has been cleaned up.  Bail.
     return;
   }
-  console.log("# window.sessions: " + window.sessions.size);
 
   while (window.htmBuffer.length >= 9) {
-    console.log(
-      new Date().toLocaleTimeString() +
-        " Buffer length: " +
-        window.htmBuffer.length
-    );
     if (window.waitingForInit) {
       setTimeout(function () {
         processHtmData();
       }, 100);
       return;
     }
+    console.log(
+      new Date().toLocaleTimeString() +
+        " Buffer length: " +
+        window.htmBuffer.length
+    );
     const packetHeader = window.htmBuffer[0];
     console.log(
       new Date().toLocaleTimeString() +
-        "GOT PACKET WITH HEADER: " +
-        packetHeader
+        " GOT PACKET WITH HEADER: " +
+        packetHeader +
+        " " +
+        packetHeader.charCodeAt(0) +
+        " " +
+        window.htmBuffer
     );
     if (packetHeader == SESSION_END) {
       console.log("Got shutdown");
@@ -209,25 +212,35 @@ const processHtmData = function () {
       closeSessions(0);
       return;
     }
-    let length = Buffer.from(
-      window.htmBuffer.substring(1, 9),
-      "base64"
-    ).readInt32LE(0);
+    let buf = Buffer.from(window.htmBuffer.substring(1, 9), "base64");
+    console.log(window.htmBuffer);
+    console.log(window.htmBuffer.length);
+    console.log(window.htmBuffer.substring(1, 9));
+    let length = buf.readInt32LE(0);
     if (length < 0) {
       console.log("Invalid length, shutting down");
       window.clean();
       window.close();
       return;
     }
-    console.log(new Date().toLocaleTimeString() + "length needed: " + length);
+    console.log(
+      new Date().toLocaleTimeString() +
+        " length needed: " +
+        length +
+        " length found " +
+        (window.htmBuffer.length - 9)
+    );
     if (window.htmBuffer.length - 9 < length) {
+      console.log("Not enough data");
       // Not enough data
       break;
     }
     switch (packetHeader) {
       case INIT_STATE: {
         const rawJsonData = window.htmBuffer.substring(9, 9 + length);
-        let decodedJsonData = Buffer.from(rawJsonData, "base64");
+        let decodedJsonData = Buffer.from(rawJsonData, "base64").toString();
+        console.log("Decoded json");
+        console.log(decodedJsonData);
         const htmState = JSON.parse(decodedJsonData);
         console.log("INITIALIZING HTM");
         window.waitingForInit = true;
@@ -241,7 +254,7 @@ const processHtmData = function () {
       case APPEND_TO_PANE: {
         console.log("APPENDING");
         const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
-        let paneData = window.htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
+        var paneData = window.htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
         console.log(paneData);
         paneData = Buffer.from(paneData, "base64").toString("utf8");
         window.rpc.emit(
@@ -251,7 +264,7 @@ const processHtmData = function () {
         break;
       }
       case DEBUG_LOG: {
-        let paneData = window.htmBuffer.substring(9, 9 + length);
+        var paneData = window.htmBuffer.substring(9, 9 + length);
         paneData = Buffer.from(paneData, "base64").toString("utf8");
         console.log("GOT DEBUG LOG: " + paneData);
         window.rpc.emit("session data", window.leaderHyperUid + paneData);
@@ -272,7 +285,11 @@ const processHtmData = function () {
         break;
       }
     }
-    window.htmBuffer = window.htmBuffer.slice(9 + length);
+    console.log("REMAINING BUFFER");
+    console.log(window.htmBuffer);
+    window.htmBuffer = (" " + window.htmBuffer).slice(1 + 9 + length);
+    console.log("REMAINING BUFFER");
+    console.log(window.htmBuffer);
   }
 };
 
@@ -342,6 +359,8 @@ exports.decorateSessionClass = (Session) => {
       }
 
       recieveData(data) {
+        console.log("RECEIVING DATA");
+        console.log(data);
         this.emit("data", data);
       }
 
@@ -363,7 +382,6 @@ exports.decorateSessionClass = (Session) => {
         buf.writeInt32LE(length, 0);
         const b64Length = buf.toString("base64");
         const packet = INSERT_KEYS + b64Length + this.htmId + b64Data;
-        console.log("WRITING TO HTM: " + packet);
         window.sessions.get(window.leaderHyperUid).pty.write(packet);
       }
 
@@ -389,8 +407,6 @@ exports.decorateSessionClass = (Session) => {
         const b64Length = buf.toString("base64");
         const packet = RESIZE_PANE + b64Length + b64Cols + b64Rows + this.htmId;
         console.log("LEADER UID: " + window.leaderHyperUid);
-        console.log("SESSIONS");
-        console.log(window.sessions);
         window.sessions.get(window.leaderHyperUid).pty.write(packet);
       }
 
@@ -431,7 +447,6 @@ exports.decorateSessionClass = (Session) => {
       }
 
       read(data) {
-        console.log("READING: " + window.leaderHyperUid + " ?= " + this.uid);
         if (window.leaderHyperUid == this.uid) {
           console.log("IN CUSTOM SESSION DATA HANDLER");
           if (htmExitRegexp.test(data)) {
@@ -463,15 +478,47 @@ exports.decorateSessionClass = (Session) => {
             closeSessions(0);
             return;
           }
+          console.log("GGG");
+          data = (" " + data).slice(1);
+          data = (" " + data.replace(new RegExp("[\r\n]", "g"), "")).slice(1);
+          // Strip everything not b64 from data
+          // let data2 = (
+          //   " " + data.replace(new RegExp("[^A-Za-z0-9+/=-]", "g"), "")
+          // ).slice(1);
+          let data2 = (" " + data.replace(/[^A-Za-z0-9+/=-]/g, "")).slice(1);
+          if (data2 != data) {
+            console.log("GOT BAD DATA");
+            console.log(data);
+            console.log(data2);
+            for (var i = 0; i < Math.max(data.length, data2.length); ++i) {
+              console.log(data.charCodeAt(i) + " " + data2.charCodeAt(i));
+            }
+            throw Error("Got bad data");
+          }
+          console.log("(1) GOT DATA: " + data.length);
+          console.log(data);
           window.htmBuffer += data;
           processHtmData();
         } else {
-          console.log("Testing for HTM");
           if (htmInitRegexp.test(data)) {
             // TODO: Close all other window.sessions
             console.log("Enabling HTM mode");
             window.leaderHyperUid = this.uid;
             window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
+            // Strip everything not b64 from data
+            // window.htmBuffer = window.htmBuffer.replace(
+            //   new RegExp("[^A-Za-z0-9+/=-]", "g"),
+            //   ""
+            // );
+            window.htmBuffer = (
+              " " + window.htmBuffer.replace(new RegExp("[\r\n]", "g"), "")
+            ).slice(1);
+            console.log(
+              "(2) GOT DATA: " +
+                window.htmBuffer.length +
+                " " +
+                window.htmBuffer
+            );
             processHtmData();
           } else {
             this.batcher.write(data);
@@ -491,8 +538,6 @@ exports.decorateSessionClass = (Session) => {
       }
 
       write(data) {
-        console.log("WRITING");
-        console.log(window.leaderHyperUid);
         if (this.uid == window.leaderHyperUid) {
           const length = data.length;
           const buf = Buffer.allocUnsafe(4);
@@ -506,36 +551,10 @@ exports.decorateSessionClass = (Session) => {
       }
     };
   }
-  console.log("WINDOW");
-  console.log(window);
-  console.log(opts);
-  console.log(newSession);
-  const uid = opts.sessionUid;
-  if (window.leaderHyperUid) {
-    const htmSession = window.sessions.get(window.leaderHyperUid);
-    console.log("CHECKING FOR " + opts.sessionUid);
-    console.log(window.hyperHtmUidMap);
-    if (window.hyperHtmUidMap.has(opts.sessionUid)) {
-      console.log("FOUND.  NOT SENDING HTM COMMAND");
-      // This is part of htm initialization.  Don't tell HTM to create anything.
-    } else
-      return new FollowerSession(
-        window,
-        window.hyperHtmUidMap.get(opts.sessionUid),
-        window.sessions.get(window.leaderHyperUid).shell
-      );
-  } else {
-    console.log("CREATING POTENTIAL LEADER");
-    console.log(newSession);
-    console.log(newSession);
-    console.log(newSession.init);
-    return newSession;
-  }
 };
 
 exports.onWindow = function (window_) {
   window = window_;
-  console.log("GOT WINDOW: " + window);
   if (window.htmMode) {
     // Already managed by a plugin
     console.log("A plugin is already managing this window");
