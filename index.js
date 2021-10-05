@@ -476,24 +476,6 @@ exports.decorateSessionClass = (Session) => {
             return;
           }
           console.log("GGG");
-          data = (" " + data).slice(1);
-          data = (" " + data.replace(new RegExp("[\r\n]", "g"), "")).slice(1);
-          // Strip everything not b64 from data
-          // let data2 = (
-          //   " " + data.replace(new RegExp("[^A-Za-z0-9+/=-]", "g"), "")
-          // ).slice(1);
-          let data2 = (" " + data.replace(/[^A-Za-z0-9+/=-]/g, "")).slice(1);
-          if (data2 != data) {
-            console.log("GOT BAD DATA");
-            console.log(data);
-            console.log(data2);
-            for (var i = 0; i < Math.max(data.length, data2.length); ++i) {
-              console.log(data.charCodeAt(i) + " " + data2.charCodeAt(i));
-            }
-            throw Error("Got bad data");
-          }
-          console.log("(1) GOT DATA: " + data.length);
-          console.log(data);
           window.htmBuffer += data;
           processHtmData();
         } else {
@@ -502,20 +484,6 @@ exports.decorateSessionClass = (Session) => {
             console.log("Enabling HTM mode");
             window.leaderHyperUid = this.uid;
             window.htmBuffer = data.substring(data.search(htmInitRegexp) + 6);
-            // Strip everything not b64 from data
-            // window.htmBuffer = window.htmBuffer.replace(
-            //   new RegExp("[^A-Za-z0-9+/=-]", "g"),
-            //   ""
-            // );
-            window.htmBuffer = (
-              " " + window.htmBuffer.replace(new RegExp("[\r\n]", "g"), "")
-            ).slice(1);
-            console.log(
-              "(2) GOT DATA: " +
-                window.htmBuffer.length +
-                " " +
-                window.htmBuffer
-            );
             processHtmData();
           } else {
             this.batcher.write(data);
