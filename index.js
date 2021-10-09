@@ -223,15 +223,7 @@ const processHtmData = function () {
       window.close();
       return;
     }
-    console.log(
-      new Date().toLocaleTimeString() +
-        " length needed: " +
-        length +
-        " length found " +
-        (window.htmBuffer.length - 9)
-    );
     if (window.htmBuffer.length - 9 < length) {
-      console.log("Not enough data");
       // Not enough data
       break;
     }
@@ -249,10 +241,8 @@ const processHtmData = function () {
         break;
       }
       case APPEND_TO_PANE: {
-        console.log("APPENDING");
         const sessionId = window.htmBuffer.substring(9, 9 + UUID_LENGTH);
         var paneData = window.htmBuffer.substring(9 + UUID_LENGTH, 9 + length);
-        console.log(paneData);
         paneData = Buffer.from(paneData, "base64").toString("utf8");
         window.rpc.emit(
           "session data",
@@ -282,11 +272,7 @@ const processHtmData = function () {
         break;
       }
     }
-    console.log("REMAINING BUFFER");
-    console.log(window.htmBuffer);
     window.htmBuffer = (" " + window.htmBuffer).slice(1 + 9 + length);
-    console.log("REMAINING BUFFER");
-    console.log(window.htmBuffer);
   }
 };
 
