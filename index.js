@@ -166,21 +166,7 @@ const processHtmData = function () {
       }, 100);
       return;
     }
-    console.log(
-      new Date().toLocaleTimeString() +
-        " Buffer length: " +
-        window.htmBuffer.length
-    );
     const packetHeader = window.htmBuffer[0];
-    console.log(
-      new Date().toLocaleTimeString() +
-        " GOT PACKET WITH HEADER: " +
-        packetHeader +
-        " " +
-        packetHeader.charCodeAt(0) +
-        " " +
-        window.htmBuffer
-    );
     if (packetHeader == SESSION_END) {
       console.log("Got shutdown");
 
@@ -213,9 +199,6 @@ const processHtmData = function () {
       return;
     }
     let buf = Buffer.from(window.htmBuffer.substring(1, 9), "base64");
-    console.log(window.htmBuffer);
-    console.log(window.htmBuffer.length);
-    console.log(window.htmBuffer.substring(1, 9));
     let length = buf.readInt32LE(0);
     if (length < 0) {
       console.log("Invalid length, shutting down");
@@ -342,8 +325,6 @@ exports.decorateSessionClass = (Session) => {
       }
 
       recieveData(data) {
-        console.log("RECEIVING DATA");
-        console.log(data);
         this.emit("data", data);
       }
 
@@ -431,7 +412,6 @@ exports.decorateSessionClass = (Session) => {
 
       read(data) {
         if (window.leaderHyperUid == this.uid) {
-          console.log("IN CUSTOM SESSION DATA HANDLER");
           if (htmExitRegexp.test(data)) {
             console.log("Exiting HTM mode");
             const sessionsToClose = [];
@@ -461,7 +441,6 @@ exports.decorateSessionClass = (Session) => {
             closeSessions(0);
             return;
           }
-          console.log("GGG");
           window.htmBuffer += data;
           processHtmData();
         } else {
