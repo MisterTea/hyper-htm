@@ -20,9 +20,11 @@ const SKIP_REASON = (() => {
 })();
 
 const TMP = "/tmp";
-const MARKER = `HTM_SYS_${Date.now()}`;
+const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const asQuote = (s) => `"${String(s).replace(/"/g, '""')}"`;
 
 const osascript = (script) => {
   try {
@@ -94,16 +96,33 @@ const listHtmdLogs = () => {
 const headerCount = (text, code) =>
   text.split(`Got message header: ${code}`).length - 1;
 
-// INSERT_KEYS are logged one character per line as "READ FROM <uid>:<char> <len>".
 const insertedKeysFromLog = (text) => {
   const parts = [];
-  const re = /READ FROM [0-9a-f-]+:(.*?) (\d+)\s*$/gm;
+  const re = new RegExp(`READ FROM ${UUID_RE}:(.*?) (\\d+)\\s*$`, "gm");
   let match;
   while ((match = re.exec(text))) {
     parts.push(match[1]);
   }
   return parts.join("");
 };
+
+const paneIdsFromPattern = (text, pattern) => {
+  const ids = [];
+  const re = new RegExp(pattern, "g");
+  let match;
+  while ((match = re.exec(text))) {
+    ids.push(match[1]);
+  }
+  return ids;
+};
+
+const writingPaneIds = (text) =>
+  paneIdsFromPattern(text, `WRITING TO (${UUID_RE}):`);
+
+const readFromPaneIds = (text) =>
+  paneIdsFromPattern(text, `READ(?:ING)? FROM (${UUID_RE})`);
+
+const unique = (ids) => [...new Set(ids)];
 
 const newestLog = (logs) => {
   let best = null;
@@ -172,6 +191,21 @@ const keyCode = (code, using) => {
   );
 };
 
+const typeLine = async (line) => {
+  focusHyper();
+  osascript(
+    `tell application "System Events" to keystroke ${asQuote(line)}`
+  );
+  keyCode("36");
+  await sleep(400);
+};
+
+const startPanePrinter = async (marker) => {
+  // zsh `repeat` avoids quotes/braces that AppleScript keystroke mangles.
+  // Keep the rate low so APPEND_TO_PANE cannot stall the leader PTY.
+  await typeLine(`repeat 40; do echo ${marker}; sleep 0.4; done &`);
+};
+
 describe(
   "Hyper HTM system tests",
   {
@@ -214,13 +248,20 @@ describe(
     });
 
     it(
-      "starts HTM and exercises split, tab, input, and pane close",
-      { timeout: 120000 },
+      "splits, opens tabs, and streams concurrent output on several panes",
+      { timeout: 150000 },
       async () => {
         const startedAt = Date.now() - 1000;
+        const stamp = `${Date.now()}`;
+        const paneA = `HTM_PANE_A_${stamp}`;
+        const paneB = `HTM_PANE_B_${stamp}`;
+        const paneC = `HTM_PANE_C_${stamp}`;
+        const paneD = `HTM_PANE_D_${stamp}`;
 
         osascript(
-          `tell application "System Events" to keystroke "${HTM_BIN} -x"`
+          `tell application "System Events" to keystroke ${asQuote(
+            `${HTM_BIN} -x`
+          )}`
         );
         keyCode("36");
 
@@ -249,40 +290,116 @@ describe(
           }
           throw new Error(
             `Timed out waiting for htmd log condition in ${logFile}. ` +
-              `headers 49/51/53/57=${headerCount(last, 49)}/${headerCount(last, 51)}/${headerCount(last, 53)}/${headerCount(last, 57)}. ` +
-              `inserted=${JSON.stringify(insertedKeysFromLog(last).slice(-80))}. ` +
+              `headers 49/51/53/57/65=${headerCount(last, 49)}/${headerCount(last, 51)}/${headerCount(last, 53)}/${headerCount(last, 57)}/${headerCount(last, 65)}. ` +
+              `writePanes=${unique(writingPaneIds(last)).length} ` +
+              `readPanes=${unique(readFromPaneIds(last)).length} ` +
+              `inserted=${JSON.stringify(insertedKeysFromLog(last).slice(-120))}. ` +
               `Last log tail:\n${last.slice(-2000)}`
           );
         };
 
-        // Let Hyper finish creating follower sessions from INIT_STATE.
         await sleep(2000);
         focusHyper();
         await sleep(300);
 
+        // Build the layout first so PTY output does not race split/tab creation.
         keystroke('"d"', "command down");
         await waitPinned((text) => headerCount(text, 57) >= 1);
-
-        osascript(
-          `tell application "System Events" to keystroke "echo ${MARKER}"`
-        );
-        keyCode("36");
-        await waitPinned((text) => insertedKeysFromLog(text).includes(MARKER));
+        await sleep(500);
 
         keystroke('"t"', "command down");
         await waitPinned((text) => headerCount(text, 53) >= 1);
+        await sleep(500);
 
         keystroke('"d"', "{command down, shift down}");
         await waitPinned((text) => headerCount(text, 57) >= 2);
+        await sleep(500);
 
-        // The new split pane is focused. Do not cycle sessions first:
-        // Cmd+Shift+] can land on the leader, and closing that disconnects
-        // htm without a CLIENT_CLOSE_PANE packet.
+        // Focus is the new bottom pane on tab 2. Start a printer, then walk
+        // pane-prev and tab-prev so each surface gets its own loop.
+        await startPanePrinter(paneD);
+        await waitPinned((text) => insertedKeysFromLog(text).includes(paneD));
+
+        keystroke('"["', "command down");
+        await sleep(400);
+        await startPanePrinter(paneC);
+        await waitPinned((text) => insertedKeysFromLog(text).includes(paneC));
+
+        keystroke('"["', "{command down, shift down}");
+        await sleep(500);
+        await startPanePrinter(paneB);
+        await waitPinned((text) => insertedKeysFromLog(text).includes(paneB));
+
+        keystroke('"]"', "command down");
+        await sleep(400);
+        await startPanePrinter(paneA);
+        await waitPinned((text) => insertedKeysFromLog(text).includes(paneA));
+
+        const afterInput = readLog(logFile);
+        const typedPanes = unique(readFromPaneIds(afterInput));
+        assert.ok(
+          typedPanes.length >= 3,
+          `expected INSERT_KEYS on at least 3 panes, got ${typedPanes.length}`
+        );
+        for (const marker of [paneA, paneB, paneC, paneD]) {
+          assert.ok(
+            insertedKeysFromLog(afterInput).includes(marker),
+            `missing typed marker ${marker}`
+          );
+        }
+
+        // Background jobs keep printing; htmd should multiplex several PTYs at once.
+        const concurrent = await waitPinned((text) => {
+          const ids = writingPaneIds(text);
+          if (unique(ids).length < 3) {
+            return false;
+          }
+          const recent = ids.slice(-30);
+          return unique(recent).length >= 2;
+        }, 20000);
+
+        const livePanes = unique(writingPaneIds(concurrent));
+        assert.ok(
+          livePanes.length >= 3,
+          `expected concurrent output from at least 3 panes, got ${livePanes.join(",")}`
+        );
+        assert.ok(
+          unique(writingPaneIds(concurrent).slice(-30)).length >= 2,
+          "expected interleaved WRITING TO lines from more than one pane"
+        );
+        assert.ok(headerCount(concurrent, 57) >= 2, "expected two NEW_SPLIT packets");
+        assert.ok(headerCount(concurrent, 53) >= 1, "expected a NEW_TAB packet");
+        assert.ok(headerCount(concurrent, 65) >= 1, "expected RESIZE_PANE after splits");
+
+        // Printers are still running; write on the focused pane and its neighbor.
+        const rwA = `HTM_RW_A_${stamp}`;
+        const rwB = `HTM_RW_B_${stamp}`;
+        await typeLine(`echo ${rwA}`);
+        keystroke('"["', "command down");
+        await sleep(300);
+        await typeLine(`echo ${rwB}`);
+
+        const afterRw = await waitPinned((text) => {
+          const keys = insertedKeysFromLog(text);
+          return (
+            keys.includes(rwA) &&
+            keys.includes(rwB) &&
+            unique(writingPaneIds(text)).length >= 3
+          );
+        }, 20000);
+        assert.ok(
+          insertedKeysFromLog(afterRw).includes(rwA),
+          `missing concurrent write marker ${rwA}`
+        );
+        assert.ok(
+          insertedKeysFromLog(afterRw).includes(rwB),
+          `missing concurrent write marker ${rwB}`
+        );
+
+        // Close the focused split pane.
         await sleep(400);
         keystroke('"w"', "command down");
         await waitPinned((text) => headerCount(text, 51) >= 1);
-
-        assert.ok(init.file, "htmd wrote an init log");
       }
     );
   }

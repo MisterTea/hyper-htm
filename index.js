@@ -221,9 +221,8 @@ const processHtmData = function () {
 
   for (const packet of parsed.packets) {
     if (packet.error === "invalid length") {
-      console.log("Invalid length, shutting down");
-      window.clean();
-      window.close();
+      console.error("Invalid HTM packet length; leaving HTM mode");
+      exitHtmMode(0);
       return;
     }
     const packetHeader = packet.header;
