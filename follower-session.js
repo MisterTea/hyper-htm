@@ -1,8 +1,5 @@
 const { EventEmitter } = require("events");
-
-const INSERT_KEYS = "1";
-const CLIENT_CLOSE_PANE = "3";
-const RESIZE_PANE = "A";
+const { cmdSendKeys, cmdKillPane, cmdRefreshClient } = require("./htm-core");
 
 module.exports = class HtmSession extends EventEmitter {
   constructor(htmPlugin, htmId, shell) {
@@ -33,15 +30,10 @@ module.exports = class HtmSession extends EventEmitter {
       }, 100);
       return;
     }
-    const b64Data = Buffer.from(data).toString("base64");
-    const length = this.htmId.length + b64Data.length;
-    const buf = Buffer.allocUnsafe(4);
-    buf.writeInt32LE(length, 0);
-    const b64Length = buf.toString("base64");
-    const packet = INSERT_KEYS + b64Length + this.htmId + b64Data;
+    const command = cmdSendKeys(this.htmId, data);
     const leader = this.htmPlugin.sessions.get(this.htmPlugin.leaderUid);
-    if (leader && leader.pty) {
-      leader.pty.write(packet);
+    if (command && leader && leader.pty) {
+      leader.pty.write(command.endsWith("\n") ? command : `${command}\n`);
     }
   }
 
@@ -56,31 +48,19 @@ module.exports = class HtmSession extends EventEmitter {
       }, 100);
       return;
     }
-    const buf = Buffer.allocUnsafe(4);
-    buf.writeInt32LE(cols, 0);
-    const b64Cols = buf.toString("base64");
-    buf.writeInt32LE(rows, 0);
-    const b64Rows = buf.toString("base64");
-    const length = b64Cols.length + b64Rows.length + this.htmId.length;
-    buf.writeInt32LE(length, 0);
-    const b64Length = buf.toString("base64");
-    const packet = RESIZE_PANE + b64Length + b64Cols + b64Rows + this.htmId;
+    const command = cmdRefreshClient(cols, rows);
     const leader = this.htmPlugin.sessions.get(this.htmPlugin.leaderUid);
     if (leader && leader.pty) {
-      leader.pty.write(packet);
+      leader.pty.write(command + "\n");
     }
   }
 
   destroy() {
     console.log("Closing follower");
-    const length = this.htmId.length;
-    const buf = Buffer.allocUnsafe(4);
-    buf.writeInt32LE(length, 0);
-    const b64Length = buf.toString("base64");
-    const packet = CLIENT_CLOSE_PANE + b64Length + this.htmId;
+    const command = cmdKillPane(this.htmId);
     const leaderSession = this.htmPlugin.sessions.get(this.htmPlugin.leaderUid);
     if (leaderSession && leaderSession.pty) {
-      leaderSession.pty.write(packet);
+      leaderSession.pty.write(command + "\n");
     }
     this.emit("exit");
     this.ended = true;

@@ -16,7 +16,6 @@
   },
   "license": "BSD-3-Clause",
   "scripts": {
-    "test": "node --test test/htm-core.test.js",
-    "test:system": "node --test test/system/hyper-htm.test.js"
+    "test": "node --test test/*.test.js"
   }
 }
