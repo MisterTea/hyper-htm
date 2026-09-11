@@ -20,6 +20,7 @@ const {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  createScreenTitleFilter,
 } = require("../htm-core");
 
 describe("longestInitPrefix", () => {
@@ -222,5 +223,31 @@ describe("GATEWAY_MENU", () => {
         "",
       ].join("\r\n")
     );
+  });
+});
+
+describe("createScreenTitleFilter", () => {
+  it("rewrites ESC k TITLE ST to OSC 2", () => {
+    const filter = createScreenTitleFilter();
+    const out = filter("pwd\r\n\u001bkpwd\u001b\\/tmp\r\n");
+    assert.equal(out.includes("\u001bk"), false);
+    assert.equal(out.includes("\u001b]2;pwd\u0007"), true);
+    assert.equal(out.includes("pwd\r\n"), true);
+    assert.equal(out.includes("/tmp"), true);
+  });
+
+  it("rewrites BEL-terminated titles and spans chunks", () => {
+    const filter = createScreenTitleFilter();
+    let out = filter("pwd\r\n\u001bk");
+    out += filter("pwd");
+    out += filter("\u0007/tmp\r\n");
+    assert.equal(out.includes("\u001bk"), false);
+    assert.equal(out.includes("\u001b]2;pwd\u0007"), true);
+    assert.equal(out.includes("/tmp"), true);
+  });
+
+  it("passes through unrelated escape sequences", () => {
+    const filter = createScreenTitleFilter();
+    assert.equal(filter("\u001b[31mred\u001b[0m"), "\u001b[31mred\u001b[0m");
   });
 });

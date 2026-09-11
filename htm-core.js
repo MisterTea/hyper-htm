@@ -312,6 +312,82 @@ const cmdSendKeys = (paneId, data) => {
   return `send -t %${paneId} -H ${hex}`;
 };
 
+/**
+ * TERM=screen shells (zsh preexec) emit screen(1) titles: ESC k TITLE ST|BEL.
+ * tmux -CC clients (iTerm2) consume those as title updates. xterm.js does not,
+ * so the TITLE text would paint as a second command echo. Rewrite to OSC 2,
+ * which Hyper/xterm.js understand. Stateful so titles may span %output chunks.
+ */
+const createScreenTitleFilter = () => {
+  const Normal = 0;
+  const Escape = 1;
+  const Title = 2;
+  const TitleEscape = 3;
+  let state = Normal;
+  let title = "";
+
+  const emitOsc = (out) => {
+    out.push("\u001b]2;" + title + "\u0007");
+    title = "";
+    state = Normal;
+  };
+
+  return (chunk) => {
+    if (chunk == null || chunk === "") {
+      return "";
+    }
+    const out = [];
+    for (let i = 0; i < chunk.length; i++) {
+      const c = chunk[i];
+      switch (state) {
+        case Normal:
+          if (c === "\u001b") {
+            state = Escape;
+          } else {
+            out.push(c);
+          }
+          break;
+        case Escape:
+          if (c === "k") {
+            state = Title;
+            title = "";
+          } else {
+            out.push("\u001b");
+            if (c === "\u001b") {
+              state = Escape;
+            } else {
+              out.push(c);
+              state = Normal;
+            }
+          }
+          break;
+        case Title:
+          if (c === "\u001b") {
+            state = TitleEscape;
+          } else if (c === "\u0007") {
+            emitOsc(out);
+          } else {
+            title += c;
+          }
+          break;
+        case TitleEscape:
+          if (c === "\\") {
+            emitOsc(out);
+          } else if (c !== "\u001b") {
+            title += c;
+            state = Title;
+          }
+          break;
+        default:
+          state = Normal;
+          out.push(c);
+          break;
+      }
+    }
+    return out.join("");
+  };
+};
+
 module.exports = {
   HTM_DCS,
   HTM_ST,
@@ -333,4 +409,5 @@ module.exports = {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  createScreenTitleFilter,
 };

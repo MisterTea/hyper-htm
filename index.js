@@ -14,6 +14,7 @@ const {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  createScreenTitleFilter,
 } = require("./htm-core");
 
 let appRef = null;
@@ -32,6 +33,7 @@ const htm = {
   windowPanes: new Map(),
   paneWindows: new Map(),
   paneOutputBuffer: new Map(),
+  paneTitleFilters: new Map(),
   htmBuffer: "",
   htmProcessing: false,
   htmProcessAgain: false,
@@ -168,14 +170,23 @@ const bindPane = (paneId, hyperUid, session) => {
 
 const emitPaneOutput = (paneId, data) => {
   const key = paneKey(paneId);
+  let filter = htm.paneTitleFilters.get(key);
+  if (!filter) {
+    filter = createScreenTitleFilter();
+    htm.paneTitleFilters.set(key, filter);
+  }
+  const filtered = filter(data);
+  if (!filtered) {
+    return;
+  }
   const hyperUid = htm.htmHyperUidMap.get(key);
   const host = hostForPane(key);
   if (hyperUid && host) {
-    host.rpc.emit("session data", hyperUid + data);
+    host.rpc.emit("session data", hyperUid + filtered);
     return;
   }
   const prev = htm.paneOutputBuffer.get(key) || "";
-  htm.paneOutputBuffer.set(key, prev + data);
+  htm.paneOutputBuffer.set(key, prev + filtered);
 };
 
 const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
@@ -276,6 +287,8 @@ const unmapPane = (oldKey, emitExit = true) => {
   htm.paneHost.delete(oldKey);
   htm.initializedSessions.delete(oldKey);
   htm.paneWindows.delete(oldKey);
+  htm.paneOutputBuffer.delete(oldKey);
+  htm.paneTitleFilters.delete(oldKey);
 };
 
 const maybeKillServerIfEmpty = () => {
@@ -345,6 +358,7 @@ const resetHtmState = () => {
   htm.windowPanes.clear();
   htm.paneWindows.clear();
   htm.paneOutputBuffer.clear();
+  htm.paneTitleFilters.clear();
   htm.htmBuffer = "";
   htm.awaitingCommand = false;
   htm.commandBuffer = "";
