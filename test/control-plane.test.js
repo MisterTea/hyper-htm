@@ -104,7 +104,7 @@ describe("Hyper control plane", () => {
       gateway.text(),
       /Exiting tmux mode, but tmux client may still be running\.\r\n/
     );
-    assert.notEqual(gateway.writes.at(-1), "detach\n");
+    assert.equal(gateway.writes.at(-1), "detach\n");
 
     gateway.session.write("ordinary shell input");
     assert.deepEqual(gateway.baseWrites, ["ordinary shell input"]);
