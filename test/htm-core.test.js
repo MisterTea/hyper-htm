@@ -197,6 +197,8 @@ describe("command builders", () => {
   it("builds split, tab, resize, kill, and send-keys commands", () => {
     assert.equal(cmdSplitWindow(0, true), "split-window -h -t %0");
     assert.equal(cmdSplitWindow(1, false), "split-window -v -t %1");
+    assert.equal(cmdSplitWindow(null, true), "split-window -h");
+    assert.equal(cmdSplitWindow(undefined, false), "split-window -v");
     assert.equal(cmdNewWindow(), "new-window");
     assert.equal(cmdRefreshClient(80, 24), "refresh-client -C 80x24");
     assert.equal(cmdKillPane(2), "kill-pane -t %2");

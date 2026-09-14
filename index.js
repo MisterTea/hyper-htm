@@ -837,16 +837,17 @@ exports.decorateSessionClass = (Session) => {
           // layout-change for an already-hosted tmux window.
           this.htmIsNewWindow = !options.splitDirection;
           htm.pendingFollowers.push(this);
-          const splitFromPane =
-            options.splitDirection &&
-            htm.hyperHtmUidMap.get(options.activeUid);
-          if (splitFromPane != null) {
+          if (options.splitDirection) {
+            // Cmd+D / Cmd+Shift+D. If focus is on the gateway (or any uid
+            // not yet mapped), still split tmux's current pane — do not
+            // fall through to new-window.
             const sideBySide = options.splitDirection == "VERTICAL";
+            const splitFromPane = htm.hyperHtmUidMap.get(options.activeUid);
             console.log(
               "Creating new split for htm:",
               options.uid,
               "from",
-              splitFromPane
+              splitFromPane != null ? splitFromPane : "(tmux current)"
             );
             writeToLeader(cmdSplitWindow(splitFromPane, sideBySide));
           } else {
