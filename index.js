@@ -611,6 +611,9 @@ const handleGatewayKeys = (data) => {
     }
     if (action === "force-quit") {
       tmuxMessage("Exiting tmux mode, but tmux client may still be running.");
+      // Drop the control-mode client so the server survives without a
+      // zombie -CC attachment (matches iTerm2 Force Quit).
+      writeToLeader(cmdDetach());
       exitHtmMode(100);
       return;
     }
