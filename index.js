@@ -34,6 +34,13 @@ const htm = {
   paneWindows: new Map(),
   paneOutputBuffer: new Map(),
   paneTitleFilters: new Map(),
+  // iTerm2-compatible OS-window affinities: each inner list is the set of
+  // tmux window ids that share one Hyper OS window (Cmd+T tabs).
+  affinities: [],
+  lastAffinities: null,
+  // Most recent %window-add that still needs a pane binding (tmux sometimes
+  // omits the initial %layout-change after control-mode new-window).
+  pendingNewWindowId: null,
   htmBuffer: "",
   htmProcessing: false,
   htmProcessAgain: false,
@@ -125,6 +132,136 @@ const writeToLeader = (command, options = {}) => {
   return true;
 };
 
+/** Persist affinities without occupying the command-reply queue. */
+const writeRaw = (command) => {
+  if (!command) {
+    return false;
+  }
+  const pty = leaderPty();
+  if (!pty) {
+    return false;
+  }
+  const line = command.endsWith("\n") ? command : `${command}\n`;
+  if (htm.logging) {
+    tmuxMessage(`> ${line.replace(/\n$/, "")}`);
+  }
+  pty.write(line);
+  return true;
+};
+
+const affinitiesPayload = () =>
+  htm.affinities
+    .map((group) =>
+      group
+        .slice()
+        .sort((a, b) => a - b)
+        .join(",")
+    )
+    .join(" ");
+
+const saveAffinities = () => {
+  const payload = affinitiesPayload();
+  if (payload === htm.lastAffinities) {
+    return;
+  }
+  htm.lastAffinities = payload;
+  writeRaw(`set @affinities "${payload}"`);
+};
+
+const groupIndexForHost = (host) => {
+  if (!host) {
+    return -1;
+  }
+  for (let i = 0; i < htm.affinities.length; i++) {
+    for (const wid of htm.affinities[i]) {
+      if (htm.tmuxWindowHost.get(String(wid)) === host) {
+        return i;
+      }
+    }
+  }
+  return -1;
+};
+
+const noteWindowOnHost = (windowId, host) => {
+  if (windowId == null || !host) {
+    return;
+  }
+  const wid = Number(String(windowId).replace(/^@/, ""));
+  if (!Number.isFinite(wid)) {
+    return;
+  }
+  htm.affinities = htm.affinities
+    .map((group) => group.filter((id) => id !== wid))
+    .filter((group) => group.length > 0);
+  const gi = groupIndexForHost(host);
+  if (gi < 0) {
+    htm.affinities.push([wid]);
+  } else if (!htm.affinities[gi].includes(wid)) {
+    htm.affinities[gi].push(wid);
+  }
+  htm.tmuxWindowHost.set(String(wid), host);
+  saveAffinities();
+};
+
+const dropWindowAffinity = (windowId) => {
+  if (windowId == null) {
+    return;
+  }
+  const wid = Number(String(windowId).replace(/^@/, ""));
+  htm.affinities = htm.affinities
+    .map((group) => group.filter((id) => id !== wid))
+    .filter((group) => group.length > 0);
+  htm.tmuxWindowHost.delete(String(wid));
+  htm.tmuxWindowHost.delete(wid);
+  saveAffinities();
+};
+
+/**
+ * Rebuild ``@affinities`` from which Hyper OS window hosts each tmux window.
+ * Called after layout changes so Cmd+T tabs (pending followers) and
+ * createWindow materializations stay in sync without relying on a single
+ * call site.
+ */
+const syncAffinitiesFromHosts = () => {
+  const byHost = new Map();
+  for (const [windowId, panes] of htm.windowPanes.entries()) {
+    const wid = Number(String(windowId).replace(/^@/, ""));
+    if (!Number.isFinite(wid) || !panes || panes.size === 0) {
+      continue;
+    }
+    let host = htm.tmuxWindowHost.get(String(wid)) || htm.tmuxWindowHost.get(wid);
+    if (!host) {
+      for (const paneKeyId of panes) {
+        host = htm.paneHost.get(paneKey(paneKeyId));
+        if (host) {
+          break;
+        }
+      }
+    }
+    // Fall back to any still-known host for this window's panes via gateway
+    // only when we already recorded a host mapping (do not invent affinities
+    // for unbound panes during Cmd+T races).
+    if (!host) {
+      continue;
+    }
+    htm.tmuxWindowHost.set(String(wid), host);
+    if (!byHost.has(host)) {
+      byHost.set(host, []);
+    }
+    const group = byHost.get(host);
+    if (!group.includes(wid)) {
+      group.push(wid);
+    }
+  }
+  // Never clobber a non-empty @affinities with [] because a transient layout
+  // left windowPanes without resolvable hosts (Cmd+T race).
+  if (byHost.size === 0 && htm.affinities.length > 0) {
+    return;
+  }
+  htm.affinities = [...byHost.values()].filter((group) => group.length > 0);
+  saveAffinities();
+};
+
 const printTmuxCommandOutput = (response) => {
   for (const aLine of String(response == null ? "" : response).split("\n")) {
     tmuxMessage(aLine.replace(/\r/g, ""));
@@ -203,7 +340,7 @@ const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
   htm.initializedSessions.add(paneKey(newPaneId));
 };
 
-const createNativeWindow = async (firstPaneIdValue) => {
+const createNativeWindow = async (firstPaneIdValue, tmuxWindowId) => {
   htm.nextSessionHtmId = paneKey(firstPaneIdValue);
   if (appRef && typeof appRef.createWindow === "function") {
     appRef.createWindow((win) => {
@@ -224,6 +361,10 @@ const createNativeWindow = async (firstPaneIdValue) => {
   if (!tabHyperId) {
     throw new Error("Could not find hyper session for new HTM window");
   }
+  const host = hostForPane(firstPaneIdValue);
+  if (host && tmuxWindowId != null) {
+    noteWindowOnHost(tmuxWindowId, host);
+  }
   return tabHyperId;
 };
 
@@ -233,11 +374,7 @@ const materializeLayout = async (node, tmuxWindowId, isWindowRoot) => {
   }
   if (node.type === "pane") {
     if (!htm.htmHyperUidMap.has(paneKey(node.id)) && isWindowRoot) {
-      await createNativeWindow(node.id);
-      const host = hostForPane(node.id);
-      if (host) {
-        htm.tmuxWindowHost.set(tmuxWindowId, host);
-      }
+      await createNativeWindow(node.id, tmuxWindowId);
     }
     return;
   }
@@ -253,17 +390,35 @@ const materializeLayout = async (node, tmuxWindowId, isWindowRoot) => {
   }
 };
 
-const bindPendingFollowers = (paneIds) => {
+const bindPendingFollowers = (paneIds, windowId) => {
+  const wid = Number(String(windowId).replace(/^@/, ""));
+  const windowAlreadyHosted =
+    htm.tmuxWindowHost.has(String(wid)) || htm.tmuxWindowHost.has(wid);
+
   for (const paneId of paneIds) {
     const key = paneKey(paneId);
     if (htm.htmHyperUidMap.has(key)) {
       continue;
     }
-    const follower = htm.pendingFollowers.shift();
+    const follower = htm.pendingFollowers[0];
     if (!follower) {
       break;
     }
+    // Cmd+T (new-window) followers must not attach to panes of an already
+    // hosted tmux window. A layout-change for the old window often races
+    // ahead of %layout-change for the new one and would steal the tab,
+    // leaving @affinities stuck on the first window only.
+    if (follower.htmIsNewWindow && windowAlreadyHosted) {
+      break;
+    }
+    htm.pendingFollowers.shift();
     bindPane(paneId, follower.uid, follower);
+    const host = hostForUid(follower.uid);
+    if (host && windowId != null) {
+      // Cmd+T (and similar): tab lands in the Hyper OS window that created
+      // the follower, so join that window's affinity group.
+      noteWindowOnHost(windowId, host);
+    }
   }
 };
 
@@ -317,7 +472,7 @@ const closeWindowPanes = (windowId) => {
     unmapPane(key);
   }
   htm.windowPanes.delete(windowId);
-  htm.tmuxWindowHost.delete(windowId);
+  dropWindowAffinity(windowId);
   maybeKillServerIfEmpty();
 };
 
@@ -359,6 +514,9 @@ const resetHtmState = () => {
   htm.paneWindows.clear();
   htm.paneOutputBuffer.clear();
   htm.paneTitleFilters.clear();
+  htm.affinities = [];
+  htm.lastAffinities = null;
+  htm.pendingNewWindowId = null;
   htm.htmBuffer = "";
   htm.awaitingCommand = false;
   htm.commandBuffer = "";
@@ -506,10 +664,21 @@ const processHtmData = function () {
           htm.reply = null;
           continue;
         }
-        if (event.line) {
-          htm.reply.body.push(event.line);
+        // Control-mode notifications (%layout-change, %output, …) can arrive
+        // interleaved with %begin/%end command replies. Swallowing them here
+        // drops Cmd+T's new window layout and breaks @affinities.
+        if (
+          event.type !== "layout-change" &&
+          event.type !== "output" &&
+          event.type !== "window-close" &&
+          event.type !== "window-add" &&
+          event.type !== "exit"
+        ) {
+          if (event.line) {
+            htm.reply.body.push(event.line);
+          }
+          continue;
         }
-        continue;
       }
       if (event.type === "reply" && event.kind === "begin") {
         let pending = null;
@@ -522,11 +691,43 @@ const processHtmData = function () {
         htm.reply = { pending, body: [] };
         continue;
       }
+      if (event.type === "window-add") {
+        htm.pendingNewWindowId = event.windowId;
+        continue;
+      }
       if (event.type === "output") {
+        const outKey = paneKey(event.paneId);
+        // tmux control mode often emits %window-add + %output for a new
+        // window's first pane without a matching %layout-change. Bind the
+        // pending Cmd+T follower from that output so @affinities updates.
+        if (
+          !htm.htmHyperUidMap.has(outKey) &&
+          htm.pendingNewWindowId != null
+        ) {
+          const idx = htm.pendingFollowers.findIndex((f) => f.htmIsNewWindow);
+          if (idx >= 0) {
+            const follower = htm.pendingFollowers.splice(idx, 1)[0];
+            bindPane(event.paneId, follower.uid, follower);
+            htm.initializedSessions.add(outKey);
+            const host = hostForUid(follower.uid);
+            const wid = htm.pendingNewWindowId;
+            const panes = htm.windowPanes.get(wid) || new Set();
+            panes.add(outKey);
+            htm.windowPanes.set(wid, panes);
+            htm.paneWindows.set(outKey, wid);
+            if (host) {
+              noteWindowOnHost(wid, host);
+            }
+            htm.pendingNewWindowId = null;
+          }
+        }
         emitPaneOutput(event.paneId, event.data);
         continue;
       }
       if (event.type === "window-close") {
+        if (htm.pendingNewWindowId === event.windowId) {
+          htm.pendingNewWindowId = null;
+        }
         closeWindowPanes(event.windowId);
         continue;
       }
@@ -550,17 +751,55 @@ const processHtmData = function () {
           continue;
         }
         const paneIds = collectPaneIds(tree);
-        bindPendingFollowers(paneIds);
+        bindPendingFollowers(paneIds, event.windowId);
         const unknown = paneIds.filter(
           (id) => !htm.htmHyperUidMap.has(paneKey(id))
         );
+        const wid = Number(String(event.windowId).replace(/^@/, ""));
+        const alreadyHosted =
+          htm.tmuxWindowHost.has(String(wid)) || htm.tmuxWindowHost.has(wid);
+        // Capture before closeRemovedPanes unmaps panes missing from this layout.
+        const donorBeforeClose = [...htm.htmHyperUidMap.keys()].find((k) => {
+          const w = htm.paneWindows.get(k);
+          return w === event.windowId || w === wid || Number(w) === wid;
+        });
         closeRemovedPanes(event.windowId, paneIds);
         if (!unknown.length) {
+          syncAffinitiesFromHosts();
+          continue;
+        }
+        // Cmd+T in flight: a layout for the old window must not steal the
+        // pending new-window follower (handled above) and must not enter
+        // waitingForInit rematerialization — that blocks %layout-change for
+        // the new tmux window and leaves @affinities incomplete.
+        if (
+          alreadyHosted &&
+          htm.pendingFollowers.some((f) => f.htmIsNewWindow)
+        ) {
+          syncAffinitiesFromHosts();
           continue;
         }
         htm.waitingForInit = true;
-        materializeLayout(tree, event.windowId, true)
+        const apply = alreadyHosted
+          ? (async () => {
+              // Rematerialize missing panes inside this OS window. Never call
+              // createNativeWindow here — that would open a second Hyper window
+              // for an already-hosted tmux window.
+              const donor =
+                paneIds.find((id) => htm.htmHyperUidMap.has(paneKey(id))) ??
+                donorBeforeClose;
+              if (donor != null) {
+                for (const id of unknown) {
+                  if (!htm.htmHyperUidMap.has(paneKey(id))) {
+                    await createSessionForSplit(donor, id, true);
+                  }
+                }
+              }
+            })()
+          : materializeLayout(tree, event.windowId, true);
+        apply
           .then(() => {
+            syncAffinitiesFromHosts();
             htm.waitingForInit = false;
             processHtmData();
           })
@@ -594,6 +833,9 @@ exports.decorateSessionClass = (Session) => {
         console.log("CREATING FOLLOWING SESSION:", options.uid);
         if (htm.nextSessionHtmId == null) {
           this.htmId = null;
+          // Cmd+T / new tab: no splitDirection. Must not be stolen by a
+          // layout-change for an already-hosted tmux window.
+          this.htmIsNewWindow = !options.splitDirection;
           htm.pendingFollowers.push(this);
           const splitFromPane =
             options.splitDirection &&

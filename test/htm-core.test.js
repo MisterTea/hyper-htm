@@ -216,10 +216,10 @@ describe("GATEWAY_MENU", () => {
         "",
         "Command Menu",
         "----------------------------",
-        "esc Detach cleanly.",
-        " X Force-quit tmux mode.",
-        " L Toggle logging.",
-        " C Run tmux command.",
+        "esc    Detach cleanly.",
+        "  X    Force-quit tmux mode.",
+        "  L    Toggle logging.",
+        "  C    Run tmux command.",
         "",
       ].join("\r\n")
     );
