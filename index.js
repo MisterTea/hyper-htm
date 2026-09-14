@@ -616,7 +616,7 @@ const handleGatewayKeys = (data) => {
     }
     if (action === "toggle-log") {
       htm.logging = !htm.logging;
-      tmuxMessage(`tmux logging ${htm.logging ? "on" : "off"}`);
+      tmuxMessage(`tmux logging ${htm.logging ? "enabled" : "disabled"}`);
       continue;
     }
     if (action === "start-command") {

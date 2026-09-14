@@ -66,7 +66,7 @@ describe("Hyper control plane", () => {
     gateway.session.consumeHtm("%begin 1 1 1\n%end 1 1 1\n");
 
     gateway.session.write("l");
-    assert.match(gateway.text(), /tmux logging on\r\n/);
+    assert.match(gateway.text(), /tmux logging enabled\r\n/);
 
     gateway.session.write("c");
     gateway.session.write("list-windows\r");
@@ -82,7 +82,7 @@ describe("Hyper control plane", () => {
     assert.match(gateway.text(), /@0 80x24 layout\r\n/);
 
     gateway.session.write("l");
-    assert.match(gateway.text(), /tmux logging off\r\n/);
+    assert.match(gateway.text(), /tmux logging disabled\r\n/);
   });
 
   it("detaches cleanly with Escape", () => {
