@@ -335,6 +335,20 @@ const filterKeyboardInput = (data) => {
   return out;
 };
 
+/**
+ * Strip zsh's temporary PROMPT_SP repair marker.
+ *
+ * During Split Right, tmux can pad this sequence to the old pane width after
+ * Hyper has resized xterm.js. The padding wraps, so CR-space-CR erases the
+ * wrong row and leaves a visible ``%``. This exact sequence is transient
+ * chrome; ordinary ``%`` output is preserved.
+ */
+const stripZshPromptSpRepair = (data) =>
+  String(data == null ? "" : data).replace(
+    /^\u001b\[1m\u001b\[7m%\u001b\[27m\u001b\[1m\u001b\[0m +\r \r/,
+    ""
+  );
+
 const createScreenTitleFilter = () => {
   const Normal = 0;
   const Escape = 1;
@@ -427,5 +441,6 @@ module.exports = {
   GATEWAY_MENU,
   cmdSendKeys,
   filterKeyboardInput,
+  stripZshPromptSpRepair,
   createScreenTitleFilter,
 };

@@ -21,6 +21,7 @@ const {
   GATEWAY_MENU,
   cmdSendKeys,
   filterKeyboardInput,
+  stripZshPromptSpRepair,
   createScreenTitleFilter,
 } = require("../htm-core");
 
@@ -219,6 +220,21 @@ describe("filterKeyboardInput", () => {
     assert.equal(filterKeyboardInput("\u001b[A"), "\u001b[A");
     assert.equal(filterKeyboardInput("hi\u001b[Ithere"), "hithere");
     assert.equal(filterKeyboardInput("echo ok\r"), "echo ok\r");
+  });
+});
+
+describe("stripZshPromptSpRepair", () => {
+  it("drops only the temporary padded percent repair sequence", () => {
+    const repair =
+      "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m" +
+      " ".repeat(81) +
+      "\r \r";
+    assert.equal(stripZshPromptSpRepair(repair + "prompt"), "prompt");
+    assert.equal(stripZshPromptSpRepair("%\r\n"), "%\r\n");
+    assert.equal(
+      stripZshPromptSpRepair("\u001b[7m%\u001b[0m\r\n"),
+      "\u001b[7m%\u001b[0m\r\n"
+    );
   });
 });
 

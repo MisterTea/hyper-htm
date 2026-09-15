@@ -15,6 +15,7 @@ const {
   GATEWAY_MENU,
   cmdSendKeys,
   filterKeyboardInput,
+  stripZshPromptSpRepair,
   createScreenTitleFilter,
 } = require("./htm-core");
 
@@ -141,7 +142,7 @@ const writeToLeader = (command, options = {}) => {
   ) {
     // Sibling Hyper panes resize immediately on Cmd+D/T; deferring
     // refresh-client avoids SIGWINCH during the new pane's first prompt.
-    htm.suppressResizeUntil = Date.now() + 1000;
+    beginLayoutMutation();
   }
   htm.commandQueue.push({
     command,
@@ -330,6 +331,10 @@ const bindPane = (paneId, hyperUid, session) => {
 
 const emitPaneOutput = (paneId, data) => {
   const key = paneKey(paneId);
+  data = stripZshPromptSpRepair(data);
+  if (!data) {
+    return;
+  }
   let filter = htm.paneTitleFilters.get(key);
   if (!filter) {
     filter = createScreenTitleFilter();
@@ -375,6 +380,21 @@ const rememberWindowLayout = (windowId, tree) => {
   const wid = String(windowId).replace(/^@/, "");
   htm.windowLayouts.set(wid, tree);
   htm.windowGridSize.set(wid, { cols: tree.cols, rows: tree.rows });
+  // A follower resize may have been calculated against the pre-split
+  // single-pane layout. The newest tmux layout is authoritative while a
+  // split/new-window is settling; never flush that stale half-width value.
+  const pending = htm.pendingClientRefresh;
+  if (
+    pending &&
+    (pending.windowId == null || String(pending.windowId) === wid) &&
+    Date.now() < htm.suppressResizeUntil
+  ) {
+    htm.pendingClientRefresh = {
+      cols: tree.cols,
+      rows: tree.rows,
+      windowId: wid,
+    };
+  }
 };
 
 /** refresh-client -C sets the whole client/window size — never a single pane. */
@@ -392,10 +412,21 @@ const queueClientRefresh = (cols, rows, windowId) => {
   htm.refreshTimer = setTimeout(() => {
     htm.refreshTimer = null;
     const pending = htm.pendingClientRefresh;
-    htm.pendingClientRefresh = null;
     if (!pending) {
       return;
     }
+    // The suppression deadline can move after this timer was scheduled
+    // (Hyper emits the sibling resize before constructing the new follower).
+    // Recheck instead of sending a stale pane-sized refresh.
+    if (Date.now() < htm.suppressResizeUntil) {
+      queueClientRefresh(
+        pending.cols,
+        pending.rows,
+        pending.windowId
+      );
+      return;
+    }
+    htm.pendingClientRefresh = null;
     if (pending.windowId != null) {
       writeToLeader(
         `refresh-client -C @${pending.windowId}:${pending.cols}x${pending.rows}`
@@ -404,6 +435,26 @@ const queueClientRefresh = (cols, rows, windowId) => {
       writeToLeader(cmdRefreshClient(pending.cols, pending.rows));
     }
   }, delay);
+};
+
+const beginLayoutMutation = (delayMs = 1500) => {
+  htm.suppressResizeUntil = Math.max(
+    htm.suppressResizeUntil,
+    Date.now() + delayMs
+  );
+  const pending = htm.pendingClientRefresh;
+  if (!pending || pending.windowId == null) {
+    return;
+  }
+  const wid = String(pending.windowId);
+  const current = htm.windowGridSize.get(wid);
+  if (current) {
+    htm.pendingClientRefresh = {
+      cols: current.cols,
+      rows: current.rows,
+      windowId: wid,
+    };
+  }
 };
 
 const queueRefreshForPane = (key, cols, rows) => {
@@ -454,7 +505,7 @@ const markPaneReadyForResize = (key) => {
 const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
   const sourceHyper = htm.htmHyperUidMap.get(paneKey(sourcePaneId));
   const host = hostForPane(sourcePaneId);
-  htm.suppressResizeUntil = Date.now() + 1500;
+  beginLayoutMutation();
   htm.nextSessionHtmId = paneKey(newPaneId);
   htm.pendingHost = host;
   if (sideBySide) {
@@ -467,7 +518,7 @@ const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
 };
 
 const createNativeWindow = async (firstPaneIdValue, tmuxWindowId) => {
-  htm.suppressResizeUntil = Date.now() + 1500;
+  beginLayoutMutation();
   htm.nextSessionHtmId = paneKey(firstPaneIdValue);
   if (appRef && typeof appRef.createWindow === "function") {
     appRef.createWindow((win) => {
@@ -984,7 +1035,7 @@ exports.decorateSessionClass = (Session) => {
           htm.pendingFollowers.push(this);
           // Suppress before emitting UI/tmux split work so sibling resize
           // events cannot shrink the client mid-prompt.
-          htm.suppressResizeUntil = Date.now() + 1500;
+          beginLayoutMutation();
           if (options.splitDirection) {
             // Cmd+D / Cmd+Shift+D. If focus is on the gateway (or any uid
             // not yet mapped), still split tmux's current pane — do not
