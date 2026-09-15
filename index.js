@@ -35,6 +35,13 @@ const htm = {
   paneWindows: new Map(),
   paneOutputBuffer: new Map(),
   paneTitleFilters: new Map(),
+  // Defer refresh-client until the pane has painted once so SIGWINCH does
+  // not interrupt zsh's first prompt (PROMPT_SP '%').
+  paneReadyForResize: new Set(),
+  pendingResize: new Map(),
+  // While split-window / new-window is settling, ignore refresh-client from
+  // sibling panes — those SIGWINCH the brand-new shell mid-prompt.
+  suppressResizeUntil: 0,
   // iTerm2-compatible OS-window affinities: each inner list is the set of
   // tmux window ids that share one Hyper OS window (Cmd+T tabs).
   affinities: [],
@@ -122,6 +129,15 @@ const writeToLeader = (command, options = {}) => {
     return false;
   }
   const line = command.endsWith("\n") ? command : `${command}\n`;
+  if (
+    command.startsWith("split-window") ||
+    command === "new-window" ||
+    command.startsWith("new-window ")
+  ) {
+    // Sibling Hyper panes resize immediately on Cmd+D/T; deferring
+    // refresh-client avoids SIGWINCH during the new pane's first prompt.
+    htm.suppressResizeUntil = Date.now() + 1000;
+  }
   htm.commandQueue.push({
     command,
     printOutput: !!options.printOutput,
@@ -290,6 +306,7 @@ const flushPaneBuffer = (paneId) => {
   const host = hostForPane(key);
   if (hyperUid && host) {
     host.rpc.emit("session data", hyperUid + buffered);
+    markPaneReadyForResize(key);
   }
 };
 
@@ -321,10 +338,28 @@ const emitPaneOutput = (paneId, data) => {
   const host = hostForPane(key);
   if (hyperUid && host) {
     host.rpc.emit("session data", hyperUid + filtered);
+    markPaneReadyForResize(key);
     return;
   }
   const prev = htm.paneOutputBuffer.get(key) || "";
   htm.paneOutputBuffer.set(key, prev + filtered);
+};
+
+const markPaneReadyForResize = (key) => {
+  if (Date.now() < htm.suppressResizeUntil) {
+    setTimeout(
+      () => markPaneReadyForResize(key),
+      htm.suppressResizeUntil - Date.now() + 10
+    );
+    return;
+  }
+  const pending = htm.pendingResize.get(key);
+  htm.paneReadyForResize.add(key);
+  if (!pending) {
+    return;
+  }
+  htm.pendingResize.delete(key);
+  writeToLeader(cmdRefreshClient(pending.cols, pending.rows));
 };
 
 const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
@@ -445,6 +480,8 @@ const unmapPane = (oldKey, emitExit = true) => {
   htm.paneWindows.delete(oldKey);
   htm.paneOutputBuffer.delete(oldKey);
   htm.paneTitleFilters.delete(oldKey);
+  htm.paneReadyForResize.delete(oldKey);
+  htm.pendingResize.delete(oldKey);
 };
 
 const maybeKillServerIfEmpty = () => {
@@ -515,6 +552,9 @@ const resetHtmState = () => {
   htm.paneWindows.clear();
   htm.paneOutputBuffer.clear();
   htm.paneTitleFilters.clear();
+  htm.paneReadyForResize.clear();
+  htm.pendingResize.clear();
+  htm.suppressResizeUntil = 0;
   htm.affinities = [];
   htm.lastAffinities = null;
   htm.pendingNewWindowId = null;
@@ -888,6 +928,17 @@ exports.decorateSessionClass = (Session) => {
 
       resize({ cols, rows }) {
         scheduleWhenReady(this, () => {
+          const key = paneKey(this.htmId);
+          const suppressMs = htm.suppressResizeUntil - Date.now();
+          // Initial xterm layout / sibling split fires resize before the new
+          // shell finishes its first prompt. Queue until output arrives and
+          // the split settle window ends (iTerm2 avoids this race).
+          if (!htm.paneReadyForResize.has(key) || suppressMs > 0) {
+            htm.pendingResize.set(key, { cols, rows });
+            const wait = Math.max(suppressMs, 0) + (htm.paneReadyForResize.has(key) ? 0 : 750);
+            setTimeout(() => markPaneReadyForResize(key), Math.max(wait, 50));
+            return;
+          }
           writeToLeader(cmdRefreshClient(cols, rows));
         });
       }
