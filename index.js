@@ -5,6 +5,7 @@ const {
   parseLayout,
   collectPaneIds,
   firstPaneId,
+  clientSizeForSplit,
   classifyGatewayKey,
   cmdRefreshClient,
   cmdSplitWindow,
@@ -15,7 +16,6 @@ const {
   GATEWAY_MENU,
   cmdSendKeys,
   filterKeyboardInput,
-  stripZshPromptSpRepair,
   createScreenTitleFilter,
 } = require("./htm-core");
 
@@ -331,7 +331,6 @@ const bindPane = (paneId, hyperUid, session) => {
 
 const emitPaneOutput = (paneId, data) => {
   const key = paneKey(paneId);
-  data = stripZshPromptSpRepair(data);
   if (!data) {
     return;
   }
@@ -371,6 +370,38 @@ const findLayoutPane = (node, paneId) => {
     }
   }
   return null;
+};
+
+const sizeClientBeforeSplit = (paneId, sideBySide, cols, rows) => {
+  if (paneId == null || !cols || !rows) {
+    return;
+  }
+  const key = paneKey(paneId);
+  const windowId = htm.paneWindows.get(key);
+  const wid =
+    windowId == null ? null : String(windowId).replace(/^@/, "");
+  const tree = wid == null ? null : htm.windowLayouts.get(wid);
+  const pane = tree ? findLayoutPane(tree, key) : null;
+  const size = clientSizeForSplit(tree, pane, sideBySide, cols, rows) || {
+    // The first split can arrive before tmux has announced its initial layout.
+    // In that case the source pane is the whole window.
+    cols: sideBySide ? cols * 2 + 1 : cols,
+    rows: sideBySide ? rows : rows * 2 + 1,
+  };
+
+  // Hyper now measures the new split before constructing its backend. Resize
+  // tmux's client so splitting the source pane yields that exact measured grid;
+  // the new shell can then draw its first prompt at the same width as xterm.
+  if (htm.refreshTimer) {
+    clearTimeout(htm.refreshTimer);
+    htm.refreshTimer = null;
+  }
+  htm.pendingClientRefresh = null;
+  writeToLeader(
+    wid == null
+      ? cmdRefreshClient(size.cols, size.rows)
+      : `refresh-client -C @${wid}:${size.cols}x${size.rows}`
+  );
 };
 
 const rememberWindowLayout = (windowId, tree) => {
@@ -1047,6 +1078,12 @@ exports.decorateSessionClass = (Session) => {
               options.uid,
               "from",
               splitFromPane != null ? splitFromPane : "(tmux current)"
+            );
+            sizeClientBeforeSplit(
+              splitFromPane,
+              sideBySide,
+              options.cols,
+              options.rows
             );
             writeToLeader(cmdSplitWindow(splitFromPane, sideBySide));
           } else {

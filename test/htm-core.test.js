@@ -9,6 +9,7 @@ const {
   parseLayout,
   collectPaneIds,
   firstPaneId,
+  clientSizeForSplit,
   parseControlStream,
   parseReplyGuard,
   classifyGatewayKey,
@@ -21,7 +22,6 @@ const {
   GATEWAY_MENU,
   cmdSendKeys,
   filterKeyboardInput,
-  stripZshPromptSpRepair,
   createScreenTitleFilter,
 } = require("../htm-core");
 
@@ -111,6 +111,24 @@ describe("parseLayout", () => {
     assert.equal(tree.type, "sidebyside");
     assert.deepEqual(collectPaneIds(tree), [0, 1, 2]);
     assert.equal(tree.children[0].type, "stacked");
+  });
+});
+
+describe("clientSizeForSplit", () => {
+  it("sizes the client before a side-by-side split", () => {
+    const tree = parseLayout("165x43,0,0,0");
+    assert.deepEqual(clientSizeForSplit(tree, tree, true, 80, 43), {
+      cols: 161,
+      rows: 43,
+    });
+  });
+
+  it("sizes the client before a stacked split", () => {
+    const tree = parseLayout("165x43,0,0,0");
+    assert.deepEqual(clientSizeForSplit(tree, tree, false, 165, 20), {
+      cols: 165,
+      rows: 41,
+    });
   });
 });
 
@@ -220,21 +238,6 @@ describe("filterKeyboardInput", () => {
     assert.equal(filterKeyboardInput("\u001b[A"), "\u001b[A");
     assert.equal(filterKeyboardInput("hi\u001b[Ithere"), "hithere");
     assert.equal(filterKeyboardInput("echo ok\r"), "echo ok\r");
-  });
-});
-
-describe("stripZshPromptSpRepair", () => {
-  it("drops only the temporary padded percent repair sequence", () => {
-    const repair =
-      "\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m" +
-      " ".repeat(81) +
-      "\r \r";
-    assert.equal(stripZshPromptSpRepair(repair + "prompt"), "prompt");
-    assert.equal(stripZshPromptSpRepair("%\r\n"), "%\r\n");
-    assert.equal(
-      stripZshPromptSpRepair("\u001b[7m%\u001b[0m\r\n"),
-      "\u001b[7m%\u001b[0m\r\n"
-    );
   });
 });
 
