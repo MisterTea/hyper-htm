@@ -39,9 +39,14 @@ const htm = {
   // not interrupt zsh's first prompt (PROMPT_SP '%').
   paneReadyForResize: new Set(),
   pendingResize: new Map(),
+  paneGridSize: new Map(),
+  windowGridSize: new Map(),
+  windowLayouts: new Map(),
   // While split-window / new-window is settling, ignore refresh-client from
   // sibling panes — those SIGWINCH the brand-new shell mid-prompt.
   suppressResizeUntil: 0,
+  refreshTimer: null,
+  pendingClientRefresh: null,
   // iTerm2-compatible OS-window affinities: each inner list is the set of
   // tmux window ids that share one Hyper OS window (Cmd+T tabs).
   affinities: [],
@@ -345,6 +350,90 @@ const emitPaneOutput = (paneId, data) => {
   htm.paneOutputBuffer.set(key, prev + filtered);
 };
 
+const findLayoutPane = (node, paneId) => {
+  if (!node) {
+    return null;
+  }
+  if (node.type === "pane" && Number(node.id) === Number(paneId)) {
+    return node;
+  }
+  if (node.children) {
+    for (const child of node.children) {
+      const found = findLayoutPane(child, paneId);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return null;
+};
+
+const rememberWindowLayout = (windowId, tree) => {
+  if (!tree || tree.type === "empty" || !tree.cols || !tree.rows) {
+    return;
+  }
+  const wid = String(windowId).replace(/^@/, "");
+  htm.windowLayouts.set(wid, tree);
+  htm.windowGridSize.set(wid, { cols: tree.cols, rows: tree.rows });
+};
+
+/** refresh-client -C sets the whole client/window size — never a single pane. */
+const queueClientRefresh = (cols, rows, windowId) => {
+  if (!cols || !rows) {
+    return;
+  }
+  const wid =
+    windowId == null ? null : String(windowId).replace(/^@/, "");
+  htm.pendingClientRefresh = { cols, rows, windowId: wid };
+  if (htm.refreshTimer) {
+    clearTimeout(htm.refreshTimer);
+  }
+  const delay = Math.max(50, htm.suppressResizeUntil - Date.now());
+  htm.refreshTimer = setTimeout(() => {
+    htm.refreshTimer = null;
+    const pending = htm.pendingClientRefresh;
+    htm.pendingClientRefresh = null;
+    if (!pending) {
+      return;
+    }
+    if (pending.windowId != null) {
+      writeToLeader(
+        `refresh-client -C @${pending.windowId}:${pending.cols}x${pending.rows}`
+      );
+    } else {
+      writeToLeader(cmdRefreshClient(pending.cols, pending.rows));
+    }
+  }, delay);
+};
+
+const queueRefreshForPane = (key, cols, rows) => {
+  htm.paneGridSize.set(key, { cols, rows });
+  const wid = htm.paneWindows.get(key);
+  if (wid == null) {
+    queueClientRefresh(cols, rows, null);
+    return;
+  }
+  const widKey = String(wid).replace(/^@/, "");
+  const tree = htm.windowLayouts.get(widKey);
+  const paneNode = tree ? findLayoutPane(tree, key) : null;
+  if (tree && paneNode && paneNode.cols > 0 && paneNode.rows > 0) {
+    const scaleX = cols / paneNode.cols;
+    const scaleY = rows / paneNode.rows;
+    queueClientRefresh(
+      Math.max(1, Math.round(tree.cols * scaleX)),
+      Math.max(1, Math.round(tree.rows * scaleY)),
+      widKey
+    );
+    return;
+  }
+  const win = htm.windowGridSize.get(widKey);
+  if (win) {
+    queueClientRefresh(win.cols, win.rows, widKey);
+    return;
+  }
+  queueClientRefresh(cols, rows, widKey);
+};
+
 const markPaneReadyForResize = (key) => {
   if (Date.now() < htm.suppressResizeUntil) {
     setTimeout(
@@ -359,12 +448,13 @@ const markPaneReadyForResize = (key) => {
     return;
   }
   htm.pendingResize.delete(key);
-  writeToLeader(cmdRefreshClient(pending.cols, pending.rows));
+  queueRefreshForPane(key, pending.cols, pending.rows);
 };
 
 const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
   const sourceHyper = htm.htmHyperUidMap.get(paneKey(sourcePaneId));
   const host = hostForPane(sourcePaneId);
+  htm.suppressResizeUntil = Date.now() + 1500;
   htm.nextSessionHtmId = paneKey(newPaneId);
   htm.pendingHost = host;
   if (sideBySide) {
@@ -377,6 +467,7 @@ const createSessionForSplit = async (sourcePaneId, newPaneId, sideBySide) => {
 };
 
 const createNativeWindow = async (firstPaneIdValue, tmuxWindowId) => {
+  htm.suppressResizeUntil = Date.now() + 1500;
   htm.nextSessionHtmId = paneKey(firstPaneIdValue);
   if (appRef && typeof appRef.createWindow === "function") {
     appRef.createWindow((win) => {
@@ -482,6 +573,7 @@ const unmapPane = (oldKey, emitExit = true) => {
   htm.paneTitleFilters.delete(oldKey);
   htm.paneReadyForResize.delete(oldKey);
   htm.pendingResize.delete(oldKey);
+  htm.paneGridSize.delete(oldKey);
 };
 
 const maybeKillServerIfEmpty = () => {
@@ -554,7 +646,15 @@ const resetHtmState = () => {
   htm.paneTitleFilters.clear();
   htm.paneReadyForResize.clear();
   htm.pendingResize.clear();
+  htm.paneGridSize.clear();
+  htm.windowGridSize.clear();
+  htm.windowLayouts.clear();
   htm.suppressResizeUntil = 0;
+  if (htm.refreshTimer) {
+    clearTimeout(htm.refreshTimer);
+    htm.refreshTimer = null;
+  }
+  htm.pendingClientRefresh = null;
   htm.affinities = [];
   htm.lastAffinities = null;
   htm.pendingNewWindowId = null;
@@ -794,6 +894,7 @@ const processHtmData = function () {
           console.error("HTM layout parse failed:", err);
           continue;
         }
+        rememberWindowLayout(event.windowId, tree);
         const paneIds = collectPaneIds(tree);
         bindPendingFollowers(paneIds, event.windowId);
         const unknown = paneIds.filter(
@@ -881,6 +982,9 @@ exports.decorateSessionClass = (Session) => {
           // layout-change for an already-hosted tmux window.
           this.htmIsNewWindow = !options.splitDirection;
           htm.pendingFollowers.push(this);
+          // Suppress before emitting UI/tmux split work so sibling resize
+          // events cannot shrink the client mid-prompt.
+          htm.suppressResizeUntil = Date.now() + 1500;
           if (options.splitDirection) {
             // Cmd+D / Cmd+Shift+D. If focus is on the gateway (or any uid
             // not yet mapped), still split tmux's current pane — do not
@@ -929,17 +1033,19 @@ exports.decorateSessionClass = (Session) => {
       resize({ cols, rows }) {
         scheduleWhenReady(this, () => {
           const key = paneKey(this.htmId);
-          const suppressMs = htm.suppressResizeUntil - Date.now();
-          // Initial xterm layout / sibling split fires resize before the new
-          // shell finishes its first prompt. Queue until output arrives and
-          // the split settle window ends (iTerm2 avoids this race).
-          if (!htm.paneReadyForResize.has(key) || suppressMs > 0) {
+          // Never apply a single pane's grid as the control-mode client size
+          // (that shrinks the whole window to half on Cmd+D and SIGWINCH'es
+          // brand-new shells into zsh PROMPT_SP '%').
+          if (
+            !htm.paneReadyForResize.has(key) ||
+            Date.now() < htm.suppressResizeUntil
+          ) {
             htm.pendingResize.set(key, { cols, rows });
-            const wait = Math.max(suppressMs, 0) + (htm.paneReadyForResize.has(key) ? 0 : 750);
+            const wait = Math.max(0, htm.suppressResizeUntil - Date.now()) + 200;
             setTimeout(() => markPaneReadyForResize(key), Math.max(wait, 50));
             return;
           }
-          writeToLeader(cmdRefreshClient(cols, rows));
+          queueRefreshForPane(key, cols, rows);
         });
       }
 
