@@ -20,6 +20,7 @@ const {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  filterKeyboardInput,
   createScreenTitleFilter,
 } = require("../htm-core");
 
@@ -206,6 +207,18 @@ describe("command builders", () => {
     assert.equal(cmdKillServer(), "kill-server");
     assert.equal(cmdSendKeys(0, "ab"), "send -t %0 -H 61 62");
     assert.equal(cmdSendKeys(0, ""), null);
+  });
+});
+
+describe("filterKeyboardInput", () => {
+  it("drops focus and DA replies but keeps arrows and text", () => {
+    assert.equal(filterKeyboardInput("\u001b[I"), "");
+    assert.equal(filterKeyboardInput("\u001b[O"), "");
+    assert.equal(filterKeyboardInput("\u001b[?1;2c"), "");
+    assert.equal(filterKeyboardInput("\u001b[1;1R"), "");
+    assert.equal(filterKeyboardInput("\u001b[A"), "\u001b[A");
+    assert.equal(filterKeyboardInput("hi\u001b[Ithere"), "hithere");
+    assert.equal(filterKeyboardInput("echo ok\r"), "echo ok\r");
   });
 });
 

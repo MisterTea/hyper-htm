@@ -1,5 +1,10 @@
 const { EventEmitter } = require("events");
-const { cmdSendKeys, cmdKillPane, cmdRefreshClient } = require("./htm-core");
+const {
+  cmdSendKeys,
+  cmdKillPane,
+  cmdRefreshClient,
+  filterKeyboardInput,
+} = require("./htm-core");
 
 module.exports = class HtmSession extends EventEmitter {
   constructor(htmPlugin, htmId, shell) {
@@ -30,7 +35,8 @@ module.exports = class HtmSession extends EventEmitter {
       }, 100);
       return;
     }
-    const command = cmdSendKeys(this.htmId, data);
+    const keys = filterKeyboardInput(data);
+    const command = cmdSendKeys(this.htmId, keys);
     const leader = this.htmPlugin.sessions.get(this.htmPlugin.leaderUid);
     if (command && leader && leader.pty) {
       leader.pty.write(command.endsWith("\n") ? command : `${command}\n`);

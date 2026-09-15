@@ -14,6 +14,7 @@ const {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  filterKeyboardInput,
   createScreenTitleFilter,
 } = require("./htm-core");
 
@@ -877,7 +878,11 @@ exports.decorateSessionClass = (Session) => {
 
       write(data) {
         scheduleWhenReady(this, () => {
-          writeToLeader(cmdSendKeys(this.htmId, data));
+          const keys = filterKeyboardInput(data);
+          if (!keys) {
+            return;
+          }
+          writeToLeader(cmdSendKeys(this.htmId, keys));
         });
       }
 

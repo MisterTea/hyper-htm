@@ -313,11 +313,28 @@ const cmdSendKeys = (paneId, data) => {
 };
 
 /**
- * TERM=screen shells (zsh preexec) emit screen(1) titles: ESC k TITLE ST|BEL.
- * tmux -CC clients (iTerm2) consume those as title updates. xterm.js does not,
- * so the TITLE text would paint as a second command echo. Rewrite to OSC 2,
- * which Hyper/xterm.js understand. Stateful so titles may span %output chunks.
+ * Strip xterm.js / Hyper automatic replies that must not be send-keys'd into
+ * the mux pane. Forwarding them leaves zsh PROMPT_SP ``%`` on new panes
+ * (iTerm2's -CC client does not inject these).
+ *
+ * Keeps real keyboard CSI (arrows, F-keys, modified keys).
  */
+const filterKeyboardInput = (data) => {
+  if (data == null || data === "") {
+    return "";
+  }
+  let out = String(data);
+  // Focus in / out (enabled when the pane shell or tmux sets focus-events).
+  out = out.split("\u001b[I").join("").split("\u001b[O").join("");
+  // Device attribute / status replies: ESC [ ? ... c|n|$n
+  out = out.replace(/\u001b\[\?[0-9;]*[c$n]/g, "");
+  // Cursor position report: ESC [ row ; col R
+  out = out.replace(/\u001b\[\d+;\d+R/g, "");
+  // Primary DA request echo variants sometimes seen as ESC [ c
+  out = out.split("\u001b[c").join("");
+  return out;
+};
+
 const createScreenTitleFilter = () => {
   const Normal = 0;
   const Escape = 1;
@@ -409,5 +426,6 @@ module.exports = {
   cmdKillServer,
   GATEWAY_MENU,
   cmdSendKeys,
+  filterKeyboardInput,
   createScreenTitleFilter,
 };
